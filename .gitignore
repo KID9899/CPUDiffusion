@@ -1,0 +1,13 @@
+build
+build/*
+
+.*
+.*/*
+
+workspace/cmake-build-debug
+workspace/cmake-build-debug/*
+
+workspace/CPUDiffusion
+workspace/perf*
+
+lib/src/**/*.o
