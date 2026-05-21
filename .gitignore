@@ -9,5 +9,7 @@ workspace/cmake-build-debug/*
 
 workspace/CPUDiffusion
 workspace/perf*
+workspace/*.safetensors
+workspace/*.dot
 
 lib/src/**/*.o

@@ -1,59 +1,53 @@
 cmake_minimum_required(VERSION 3.15)
 project(CPUDiffusion)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Пути для библиотек
-set(LIB_DIR ${CMAKE_SOURCE_DIR}/../lib/builds)
-link_directories(${LIB_DIR})
-set(LIB_SRC_DIR ${CMAKE_SOURCE_DIR}/../lib/src)
-file(GLOB LIB_SUBDIRS CONFIGURE_DEPENDS LIST_DIRECTORIES true RELATIVE ${LIB_SRC_DIR} ${LIB_SRC_DIR}/*)
+# ---------- пути ----------
+set(LIB_SRC_DIR      ${CMAKE_SOURCE_DIR}/../lib/src)
+set(LIB_BUILD_DIR    ${CMAKE_SOURCE_DIR}/../lib/builds)
+set(LIB_INCLUDES_DIR ${CMAKE_SOURCE_DIR}/../lib/includes)
 
-# Создаём цели для библиотек
-set(CMAKE_JOB_POOLS "lib_build_pool=1")
+# подключаем функцию для сборки библиотек
+include(${CMAKE_SOURCE_DIR}/../lib/BuildLibrary.cmake)
 
-set(LIB_NAMES)
-foreach(SUBDIR ${LIB_SUBDIRS})
-    if(IS_DIRECTORY ${LIB_SRC_DIR}/${SUBDIR})
-        list(APPEND LIB_NAMES ${SUBDIR})
+# ---------- сборка всех библиотек ----------
+file(GLOB LIB_SUBDIRS LIST_DIRECTORIES true ${LIB_SRC_DIR}/*)
 
-        add_custom_target(build_lib_${SUBDIR}
-                COMMAND $(MAKE) clean -C ${LIB_SRC_DIR}/${SUBDIR}
-                COMMAND $(MAKE) all -C ${LIB_SRC_DIR}/${SUBDIR}
-                COMMENT "Building library '${SUBDIR}'"
-        )
+set(ALL_LIB_TARGETS)       # цели самих библиотек
+set(ALL_COPY_TARGETS)      # цели копирования их заголовков
 
-        list(APPEND BUILD_TARGETS build_lib_${SUBDIR})
+foreach(LIB_PATH ${LIB_SUBDIRS})
+    if(IS_DIRECTORY ${LIB_PATH} AND EXISTS ${LIB_PATH}/CMakeLists.txt)
+        get_filename_component(LIB_NAME ${LIB_PATH} NAME)
+        add_subdirectory(${LIB_PATH} ${CMAKE_BINARY_DIR}/libs/${LIB_NAME})
+
+        if(LIB_TARGET)
+            list(APPEND ALL_LIB_TARGETS ${LIB_TARGET})
+        endif()
+        if(COPY_TARGET)
+            list(APPEND ALL_COPY_TARGETS ${COPY_TARGET})
+        endif()
+
+        unset(LIB_TARGET)
+        unset(COPY_TARGET)
     endif()
 endforeach()
 
-# Итоговая цель для всех либ
-add_custom_target(build_libs ALL
-        DEPENDS ${BUILD_TARGETS}
-        COMMENT "Building all external libraries"
-)
+# ---------- основная программа ----------
+add_executable(${PROJECT_NAME} main.cpp)
+target_include_directories(${PROJECT_NAME} PRIVATE ${LIB_INCLUDES_DIR})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${ALL_LIB_TARGETS})
 
-# Сборка программы
-set(SRC_DIR ${CMAKE_SOURCE_DIR}/../src)
-file(GLOB_RECURSE PROGRAM_SOURCES
-        ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
-#        ${SRC_DIR}/*.cpp
-)
-add_executable(${PROJECT_NAME} ${PROGRAM_SOURCES})
+# чтобы заголовки всегда были актуальны перед компиляцией
+foreach(CT ${ALL_COPY_TARGETS})
+    add_dependencies(${PROJECT_NAME} ${CT})
+endforeach()
 
-# Подключение библиотек
-include_directories(${CMAKE_SOURCE_DIR}/../lib/includes)
-add_dependencies(${PROJECT_NAME} build_libs)
-target_link_libraries(${PROJECT_NAME}
-        cpudiff
-)
-
-# Подготавливаем среду для исполняемого файла
+# ---------- настройки запуска ----------
 set_target_properties(${PROJECT_NAME} PROPERTIES
-        BUILD_RPATH "${LIB_DIR}"
-        INSTALL_RPATH "\$ORIGIN/../lib/builds"
-)
-set_target_properties(${PROJECT_NAME} PROPERTIES
+        BUILD_RPATH           "${LIB_BUILD_DIR}"
+        INSTALL_RPATH         "\$ORIGIN/../lib/builds"
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
