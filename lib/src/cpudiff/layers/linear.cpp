@@ -4,7 +4,7 @@
 
 #include "linear.h"
 
-Linear::Linear(Graph *graph, uint64_t in_size, uint64_t out_size): Module(graph), in_size(in_size), out_size(out_size) {
+Linear::Linear(Graph *graph, size_t in_size, size_t out_size): Module(graph), in_size(in_size), out_size(out_size) {
     matmul_result = future();
     weight_t = future();
 
@@ -12,7 +12,7 @@ Linear::Linear(Graph *graph, uint64_t in_size, uint64_t out_size): Module(graph)
     register_tensor("bias", bias);
 }
 
-TensorResult Linear::forward(const Tensor &x) {
+Tensor::CanAssign Linear::forward(const Tensor &x) {
     matmul_result = x ^ weight_t;
     return matmul_result + bias;
 }

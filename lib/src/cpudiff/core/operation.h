@@ -10,11 +10,17 @@
 class UniqueTensor;
 
 enum class OperationId : uint8_t {
-    ADD, SUB, MUL, DIV, FMUL, FDIV, MATMUL, NEGATE, INVERT, FILL, RANDN, COPY, EXP, RELU, SIGMOID, TRANSPOSE
+    FILL, RANDN,
+    VIEW, COPY, TRANSPOSE,
+    REPR, DUMP,
+    ADD, SUB, NEGATE,
+    MUL, DIV, INVERT, FMUL, FDIV,
+    MATMUL,
+    EXP, RELU, SIGMOID
 };
 
 struct GraphOperation {
-    union SecondArg {const UniqueTensor *t; float f; };
+    union SecondArg { const UniqueTensor *t; float f; const char *s; };
 
     OperationId id;
     const UniqueTensor *src1;
@@ -27,6 +33,9 @@ struct GraphOperation {
 
 inline const char* operation_name(OperationId id) {
     switch (id) {
+        case OperationId::VIEW:     return "view";
+        case OperationId::REPR:     return "print";
+        case OperationId::DUMP:     return "save";
         case OperationId::ADD:      return "+";
         case OperationId::SUB:      return "-";
         case OperationId::MUL:      return "*";

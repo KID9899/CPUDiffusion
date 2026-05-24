@@ -11,19 +11,19 @@ class ReLU final: public Module {
 public:
     inline ReLU(Graph *graph): Module(graph) {}
 protected:
-    TensorResult forward(const Tensor &x) override;
+    Tensor::CanAssign forward(const Tensor &x) override;
 };
 
 class Sigmoid final: public Module {
 public:
     inline Sigmoid(Graph *graph): Module(graph) {}
 protected:
-    TensorResult forward(const Tensor &x) override;
+    Tensor::CanAssign forward(const Tensor &x) override;
 };
 
 class Flatten final: public Module {
 public:
     inline Flatten(Graph *graph): Module(graph) {}
 protected:
-    TensorResult forward(const Tensor &x) override;
+    Tensor::CanAssign forward(const Tensor &x) override;
 };

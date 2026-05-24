@@ -82,7 +82,12 @@ SafeTensorsFile::SafeTensorsFile(const std::string &path, Graph *graph): graph(g
         std::string dtype_str = tensor_info["dtype"].get<std::string>();
         Dtype dtype = dtype_from_string(dtype_str);
 
-        std::vector<size_t> shape = tensor_info["shape"].get<std::vector<size_t>>();
+        std::vector<uint64_t> shape_uint64 = tensor_info["shape"].get<std::vector<uint64_t>>();
+        std::vector<size_t> shape;
+        for (const auto &i: shape_uint64) {
+            if (!std::cmp_less_equal(i, SIZE_MAX)) throw std::overflow_error("The tensor data size overflows the size_t type");
+            shape.push_back(i);
+        }
 
         auto offsets = tensor_info["data_offsets"].get<std::vector<uint64_t>>();
         if (offsets.size() != 2) {
@@ -97,7 +102,7 @@ SafeTensorsFile::SafeTensorsFile(const std::string &path, Graph *graph): graph(g
         }
 
         // Заполняем TensorHeader
-        Tensor th = graph->add_existing(static_cast<void*>(data_base + start_off), static_cast<void*>(data_base + end_off), std::move(shape), dtype);
+        Tensor th = graph->add_existing(static_cast<void*>(data_base + start_off), static_cast<void*>(data_base + end_off), std::move(shape), tensor_name, dtype);
 
         // Сохраняем в наш класс
         size_t idx = tensors_.size();

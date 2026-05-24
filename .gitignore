@@ -11,5 +11,10 @@ workspace/CPUDiffusion
 workspace/perf*
 workspace/*.safetensors
 workspace/*.dot
+workspace/*.trepr
+workspace/*.traw
+
+workspace/out
+workspace/out/*
 
 lib/src/**/*.o

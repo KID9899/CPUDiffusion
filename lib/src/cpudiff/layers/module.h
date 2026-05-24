@@ -19,13 +19,11 @@ private:
 protected:
     Graph *graph;
     Tensor input;
-    virtual TensorResult forward(const Tensor &x) = 0;
+    // Основная функция для переопределения поведения модуля
+    virtual Tensor::CanAssign forward(const Tensor &x) = 0;
+    // Дополнительная функция, выполняющаяся после загрузки тензора
     virtual void on_load() {};
-public:
-    inline Module(Graph *graph): graph(graph) {
-        input = future();
-    }
-    void load(const SafeTensorsFile *file);
+
     inline void register_module(const std::string &name, Module &module) {
         if (children.contains(name) || weights.contains(name)) throw std::logic_error("Two descendants of a module cannot have the same name");
         children[name] = &module;
@@ -41,13 +39,15 @@ public:
     inline Tensor future() {
         return graph->future();
     }
-    inline TensorResult forward(const TensorResult &x) {
+    inline Tensor::CanAssign forward(const Tensor::CanAssign &x) {
         input = x;
         return forward(input);
     };
-    inline TensorResult build(const Tensor &x) {
-        return forward(x);
+public:
+    inline Module(Graph *graph): graph(graph) {
+        input = future();
     }
-    inline TensorResult operator()(const TensorResult &x) { return forward(x); }
-    inline TensorResult operator()(const Tensor &x) { return forward(x); }
+    void load(const SafeTensorsFile *file);
+    inline Tensor::CanAssign operator()(const Tensor &x) { return forward(x); }
+    inline Tensor::CanAssign operator()(const Tensor::CanAssign &x) { return forward(x); }
 };

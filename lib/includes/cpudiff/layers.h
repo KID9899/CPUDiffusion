@@ -5,4 +5,4 @@
 #include "layers/module.h"
 #include "layers/linear.h"
 #include "layers/sequential.h"
-#include "layers/activators.h"
+#include "layers/functions.h"

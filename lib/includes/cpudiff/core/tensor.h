@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <utility>
 #include <algorithm>
+#include <variant>
 
 #include "operation.h"
 
@@ -25,13 +26,15 @@ class UniqueTensor {
     friend class Tensor;
 private:
     Graph *graph;
-    void *start;
+    void *start, *end;
+    std::string name_;
     uintptr_t page_start;
     size_t span;
-    std::vector<uint64_t> shape_;
+    std::vector<size_t> shape_;
 
     inline void set_memory(void *start, void *end) {
         this->start = start;
+        this->end = end;
         auto page_size = sysconf(_SC_PAGESIZE);
         page_start = reinterpret_cast<uintptr_t>(start) & ~(page_size - 1);
 
@@ -44,15 +47,18 @@ private:
         span = static_cast<size_t>(diff);
     }
 public:
-    inline UniqueTensor(Graph *graph, const std::vector<uint64_t>& shape): graph(graph), start(nullptr), shape_(shape) {}
+    inline UniqueTensor(Graph *graph, const std::vector<size_t>& shape, const std::string &name = ""): graph(graph), start(nullptr), end(nullptr), shape_(shape), name_(name) {}
 
     inline void prefetch() const {
         if (start == nullptr) throw std::runtime_error("The memory for the promised tensor was not allocated at the time of use");
         madvise(reinterpret_cast<void*>(page_start), span, MADV_WILLNEED);
     }
-    inline const std::vector<uint64_t> &shape() const { return shape_; }
+    inline const std::vector<size_t> &shape() const { return shape_; }
     inline void *data() const { return start; }
+    inline std::string name() const { return name_; }
     Tensor reference();
+    void dump(std::ostream &out) const;
+    void repr(std::ostream &out) const;
 };
 
 // Класс, хранящий результат операции, непривязанный к тензору
@@ -62,12 +68,17 @@ private:
     OperationId id;
     const UniqueTensor *src1;
     GraphOperation::SecondArg src2;
-    std::vector<uint64_t> shape;
+    std::vector<size_t> shape;
 
-    TensorResult(OperationId id, const UniqueTensor *src1, GraphOperation::SecondArg src2, const std::vector<uint64_t>& shape);
-public:
-    // Мгновенная привязка в тензору
-    Tensor &operator[](Tensor &t);
+    TensorResult(OperationId id, const UniqueTensor *src1, GraphOperation::SecondArg src2, const std::vector<size_t>& shape);
+};
+
+class TensorView {
+    friend class Tensor;
+private:
+    const UniqueTensor *unique;
+    std::vector<size_t> new_shape;
+    inline TensorView(const UniqueTensor *unique, const std::vector<size_t> &new_shape): unique(unique), new_shape(new_shape) {}
 };
 
 // Безопасная обёртка над уникальным тензором
@@ -79,8 +90,10 @@ private:
     UniqueTensor *unique;
     Tensor(UniqueTensor *unique);;
 
-    Graph *graph();;
+    Graph *graph();
 public:
+    typedef std::variant<TensorView, TensorResult> CanAssign;
+
     inline Tensor(const Tensor& other): unique(other.unique) {}
     inline Tensor(Tensor&& other): unique(other.unique) { other.unique = nullptr; }
     Tensor& operator=(const Tensor& other) = default;
@@ -90,7 +103,10 @@ public:
 
     inline Tensor(): unique(nullptr) {};
     void *data() const;
-    const std::vector<uint64_t> &shape() const;
+    const std::vector<size_t> &shape() const;
+
+    void dump(const char *filename);
+    void repr(const char *filename);
 
     // Заполнение тензора значениями
     void fill(float v);
@@ -100,8 +116,10 @@ public:
     TensorResult copy() const;
     TensorResult transpose() const;
 
+    // Привязка тензора к размеру
+    Tensor &operator<<(const std::vector<size_t> &shape);
     // Привязка тензора к результату
-    Tensor &operator=(TensorResult res);
+    Tensor &operator=(CanAssign other);
 
     // Сумма-разность
     TensorResult operator+(Tensor other) const;
@@ -122,4 +140,22 @@ public:
     TensorResult exp() const;
     TensorResult relu() const;
     TensorResult sigmoid() const;
+
+    // Операции присваивания
+    inline Tensor &operator+=(Tensor other) { return this->operator=(this->operator+(other)); };
+    inline Tensor &operator-=(Tensor other) { return this->operator=(this->operator-(other)); };
+    inline Tensor &operator*=(Tensor other) { return this->operator=(this->operator*(other)); };
+    inline Tensor &operator/=(Tensor other) { return this->operator=(this->operator/(other)); };
+    inline Tensor &operator*=(float other) {
+        // Для инвертирования относительно сложения просто домножь на -1!
+        if (std::abs(other + 1.f) < 1e-5f) { return this->operator=(this->operator-()); }
+        return this->operator=(this->operator*(other));
+    };
+    inline Tensor &operator/=(float other) { return this->operator=(this->operator/(other)); };
+    inline Tensor &operator^=(Tensor other) { return this->operator=(this->operator^(other)); };
+
+    // Реинтерпретация тензора как тензора с другой размерностью
+    TensorView view(const std::vector<size_t> &shape) const;
+    // Преобразовать тензор в двухмерный с сохранением первого измерения
+    TensorView flatten() const;
 };

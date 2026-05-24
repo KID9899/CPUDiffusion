@@ -11,7 +11,11 @@ add_dynamic_library(
         layers/module.cpp
         layers/linear.cpp
         layers/sequential.cpp
-        layers/activators.cpp
+        layers/functions.cpp
+
+        images/png.cpp
+
+        executors/simple.cpp
 
     HEADERS
         typeutils/dtypes.h
@@ -26,12 +30,18 @@ add_dynamic_library(
         layers/module.h
         layers/linear.h
         layers/sequential.h
-        layers/activators.h
+        layers/functions.h
+
+        images/png.h
+
+        executors/simple.h
 
         typeutils.h
         core.h
         safetensors.h
         layers.h
+        images.h
+        executors.h
 
         cpudiff.h
 

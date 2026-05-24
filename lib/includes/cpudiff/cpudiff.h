@@ -6,3 +6,5 @@
 #include "core.h"
 #include "safetensors.h"
 #include "layers.h"
+#include "images.h"
+#include "executors.h"

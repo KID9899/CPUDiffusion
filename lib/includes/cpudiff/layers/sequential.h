@@ -15,6 +15,6 @@ public:
         }
     }
 protected:
-    TensorResult forward(const Tensor &x) override;
+    Tensor::CanAssign forward(const Tensor &x) override;
 };
 
