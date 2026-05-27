@@ -5,18 +5,11 @@
 #include "linear.h"
 
 Linear::Linear(Graph *graph, size_t in_size, size_t out_size): Module(graph), in_size(in_size), out_size(out_size) {
-    matmul_result = future();
-    weight_t = future();
-
     register_tensor("weight", weight);
     register_tensor("bias", bias);
 }
+Linear::Linear(size_t in_size, size_t out_size): Linear(Graph::get_active(), in_size, out_size) {}
 
-Tensor::CanAssign Linear::forward(const Tensor &x) {
-    matmul_result = x ^ weight_t;
-    return matmul_result + bias;
-}
-
-void Linear::on_load() {
-    weight_t = weight.transpose();
+Tensor Linear::forward(const Tensor &x) {
+    return (x ^ weight.transpose()) + bias;
 }

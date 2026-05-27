@@ -6,11 +6,10 @@
 
 #pragma once
 
-
-class SimpleExecutor final: public GraphExecutor {
+class SimpleExecutor final : public GraphExecutor {
 protected:
-    virtual const std::unordered_set<OperationId> &getSupportedOperation() const override;
+    const std::unordered_set<OperationId> &getSupportedOperation() const override;
 public:
-    inline SimpleExecutor(Graph *graph): GraphExecutor(graph) {}
-    virtual void execute() const;
+    inline SimpleExecutor(Graph *graph) : GraphExecutor(graph) {}
+    void execute() const override;
 };

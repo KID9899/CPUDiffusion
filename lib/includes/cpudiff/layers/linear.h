@@ -10,14 +10,12 @@ class Linear final: public Module {
 private:
     size_t in_size, out_size;
 
-    Tensor matmul_result;
-    Tensor weight_t;
 public:
     Tensor weight;
     Tensor bias;
 
     Linear(Graph *graph, size_t in_size, size_t out_size);
+    Linear(size_t in_size, size_t out_size);
 protected:
-    Tensor::CanAssign forward(const Tensor &x) override;
-    void on_load() override;
+    Tensor forward(const Tensor &x) override;
 };

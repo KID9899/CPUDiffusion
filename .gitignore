@@ -12,6 +12,7 @@ workspace/perf*
 workspace/*.safetensors
 workspace/*.dot
 workspace/*.trepr
+workspace/*.grepr
 workspace/*.traw
 
 workspace/out

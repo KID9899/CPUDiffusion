@@ -7,261 +7,211 @@
 #include <fstream>
 #include <random>
 #include <cmath>
+#include <functional>
+#include <numeric>
 
 #include "simple.h"
 
 const std::unordered_set<OperationId> &SimpleExecutor::getSupportedOperation() const {
     static std::unordered_set<OperationId> supported = {
             OperationId::FILL, OperationId::RANDN,
-            OperationId::COPY, OperationId::TRANSPOSE,
+            OperationId::TRANSPOSE,
             OperationId::VIEW, OperationId::REPR, OperationId::DUMP,
             OperationId::ADD, OperationId::SUB, OperationId::MUL, OperationId::DIV,
-            OperationId::FMUL, OperationId::FDIV, OperationId::NEGATE, OperationId::INVERT,
+            OperationId::FADD, OperationId::FSUB, OperationId::FMUL, OperationId::FDIV,
+            OperationId::NEGATE, OperationId::INVERT,
             OperationId::MATMUL,
-            OperationId::EXP, OperationId::RELU, OperationId::SIGMOID
+            OperationId::EXP, OperationId::RELU, OperationId::SIGMOID, OperationId::TANH
     };
     return supported;
 }
 
 void SimpleExecutor::execute() const {
-    for (const GraphOperation &current_op: operations()) {
-        current_op.src1->prefetch();
-        const auto &src1_shape = current_op.src1->shape();
+    for (const CompleteOperation &op : operations()) {
+        // prefetch обязательных аргументов
+        op.arg1.prefetch();
 
-        ptrdiff_t src1_num_elements = 1;
-        for (size_t i = 0; i < src1_shape.size(); ++i) src1_num_elements *= src1_shape[i];
+        const auto &shape1 = op.arg1.shape;
+        ptrdiff_t n1 = 1;
+        for (size_t d : shape1) n1 *= d;
+        float *src1 = op.arg1.start;
 
-        float *src1_start = static_cast<float*>(current_op.src1->data());
-        float *src1_end = static_cast<float*>(src1_start) + src1_num_elements;
-
-        switch (current_op.id) {
-            case (OperationId::FILL): {
-                std::fill(std::execution::par, src1_start, src1_end, current_op.src2.f);
+        switch (op.id) {
+            case OperationId::FILL: {
+                float val = std::get<float>(op.arg2);
+                std::fill(std::execution::par, src1, src1 + n1, val);
                 break;
             }
-            case (OperationId::RANDN): {
+            case OperationId::RANDN: {
                 auto gen = []() {
                     thread_local std::mt19937 engine(std::random_device{}());
                     thread_local std::normal_distribution<float> dist(0.0f, 1.0f);
                     return dist(engine);
                 };
-                std::generate(std::execution::par, src1_start, src1_end, gen);
+                std::generate(std::execution::par, src1, src1 + n1, gen);
                 break;
             }
 
-            case (OperationId::COPY): {
-                current_op.result->prefetch();
-                float *res = static_cast<float*>(current_op.result->data());
-                std::copy(src1_start, src1_end, res);
-                break;
-            }
-            case (OperationId::TRANSPOSE): {
-                current_op.result->prefetch();
-                float *res = static_cast<float*>(current_op.result->data());
-
-                const size_t last_dim = src1_shape.back();
-                const size_t pre_last_dim = src1_shape[src1_shape.size() - 2];
+            case OperationId::TRANSPOSE: {
+                op.result.prefetch();
+                float *res = op.result.start;
+                const size_t last_dim = shape1.back();
+                const size_t pre_last_dim = shape1[shape1.size() - 2];
                 const size_t block_size = pre_last_dim * last_dim;
-                const size_t num_blocks = src1_num_elements / block_size;
+                const size_t num_blocks = n1 / block_size;
 
-                // Параллельная обработка всех блоков
                 std::vector<size_t> block_ids(num_blocks);
                 std::iota(block_ids.begin(), block_ids.end(), 0);
                 std::for_each(std::execution::par, block_ids.begin(), block_ids.end(),
                               [&](size_t b) {
                                   size_t base = b * block_size;
-                                  for (size_t i = 0; i < pre_last_dim; ++i) {
-                                      for (size_t j = 0; j < last_dim; ++j) {
-                                          // (i,j) -> (j,i)
-                                          res[base + j * pre_last_dim + i] = src1_start[base + i * last_dim + j];
-                                      }
-                                  }
-                              }
-                );
+                                  for (size_t i = 0; i < pre_last_dim; ++i)
+                                      for (size_t j = 0; j < last_dim; ++j)
+                                          res[base + j * pre_last_dim + i] = src1[base + i * last_dim + j];
+                              });
                 break;
             }
 
-            case (OperationId::VIEW): {
+            case OperationId::VIEW:
                 break;
-            }
-            case (OperationId::REPR):
-            case (OperationId::DUMP): {
-                std::ofstream out(current_op.src2.s);
-                if (!out) throw std::runtime_error(std::string("Cannot open file: ") + current_op.src2.s);
-                if (current_op.id == OperationId::REPR)
-                    current_op.src1->repr(out);
+
+            case OperationId::REPR:
+            case OperationId::DUMP: {
+                const char* filename = std::get<const char*>(op.arg2);
+                std::ofstream out(filename);
+                if (!out) throw std::runtime_error(std::string("Cannot open file: ") + filename);
+                if (op.id == OperationId::REPR)
+                    op.arg1.repr(out);
                 else
-                    current_op.src1->dump(out);
-                if (!out) throw std::runtime_error(std::string("Error writing to file: ") + current_op.src2.s);
+                    op.arg1.dump(out);
+                if (!out) throw std::runtime_error(std::string("Error writing to file: ") + filename);
                 break;
             }
 
-            case (OperationId::ADD):
-            case (OperationId::SUB):
-            case (OperationId::MUL):
-            case (OperationId::DIV): {
-                current_op.src2.t->prefetch();
-                current_op.result->prefetch();
-
-                const auto &src2_shape = current_op.src2.t->shape();
-
-                ptrdiff_t src2_num_elements = 1;
-                for (size_t i = 0; i < src2_shape.size(); ++i) src2_num_elements *= src2_shape[i];
-
-                float *src2_start = static_cast<float*>(current_op.src2.t->data());
-                float *src2_end = static_cast<float*>(src2_start) + src2_num_elements;
+            case OperationId::ADD:
+            case OperationId::SUB:
+            case OperationId::MUL:
+            case OperationId::DIV: {
+                const BoundTensor &src2_t = std::get<BoundTensor>(op.arg2);
+                src2_t.prefetch();
+                op.result.prefetch();
+                const auto &shape2 = src2_t.shape;
+                ptrdiff_t n2 = 1;
+                for (size_t d : shape2) n2 *= d;
+                float *src2 = src2_t.start;
+                float *res = op.result.start;
 
                 std::function<float(float, float)> f;
-                switch (current_op.id) {
-                    case (OperationId::ADD): {
-                        f = [](float x, float y) { return x + y; };
-                        break;
-                    }
-                    case (OperationId::SUB): {
-                        f = [](float x, float y) { return x - y; };
-                        break;
-                    }
-                    case (OperationId::MUL): {
-                        f = [](float x, float y) { return x * y; };
-                        break;
-                    }
-                    case (OperationId::DIV): {
-                        f = [](float x, float y) { return x / y; };
-                        break;
-                    }
+                switch (op.id) {
+                    case OperationId::ADD: f = [](float x, float y) { return x + y; }; break;
+                    case OperationId::SUB: f = [](float x, float y) { return x - y; }; break;
+                    case OperationId::MUL: f = [](float x, float y) { return x * y; }; break;
+                    case OperationId::DIV: f = [](float x, float y) { return x / y; }; break;
+                    default: break;
                 }
 
-                for (
-                        float *src = src1_start, *res = static_cast<float*>(current_op.result->data());
-                        src < src1_end;
-                        src += src2_num_elements, res += src2_num_elements
-                ) {
+                for (float *s = src1, *r = res; s < src1 + n1; s += n2, r += n2)
                     std::transform(std::execution::par_unseq,
-                                   src, src + src2_num_elements,
-                                   src2_start, res, f);
-                }
+                                   s, s + n2, src2, r, f);
                 break;
             }
 
-            case (OperationId::FMUL):
-            case (OperationId::FDIV):
-            case (OperationId::NEGATE):
-            case (OperationId::INVERT): {
+            case OperationId::FADD:
+            case OperationId::FSUB:
+            case OperationId::FMUL:
+            case OperationId::FDIV:
+            case OperationId::NEGATE:
+            case OperationId::INVERT: {
+                op.result.prefetch();
+                float val = (op.id == OperationId::NEGATE || op.id == OperationId::INVERT) ?
+                            0.0f : std::get<float>(op.arg2);
                 std::function<float(float)> f;
-                const float src2 = current_op.src2.f;
-                switch (current_op.id) {
-                    case (OperationId::FMUL): {
-                        f = [src2](float x) { return x * src2; };
-                        break;
-                    }
-                    case (OperationId::FDIV): {
-                        f = [src2](float x) { return x / src2; };
-                        break;
-                    }
-                    case (OperationId::NEGATE): {
-                        f = [](float x) { return -x; };
-                        break;
-                    }
-                    case (OperationId::INVERT): {
-                        f = [](float x) { return 1.f/x; };
-                        break;
-                    }
+                switch (op.id) {
+                    case OperationId::FADD: f = [val](float x) { return x + val; }; break;
+                    case OperationId::FSUB: f = [val](float x) { return x - val; }; break;
+                    case OperationId::FMUL: f = [val](float x) { return x * val; }; break;
+                    case OperationId::FDIV: f = [val](float x) { return x / val; }; break;
+                    case OperationId::NEGATE: f = [](float x) { return -x; }; break;
+                    case OperationId::INVERT: f = [](float x) { return 1.0f / x; }; break;
+                    default: break;
                 }
-                std::transform(std::execution::par_unseq, src1_start, src1_end, static_cast<float*>(current_op.result->data()), f);
+                std::transform(std::execution::par_unseq,
+                               src1, src1 + n1, op.result.start, f);
                 break;
             }
 
-            case (OperationId::MATMUL): {
-                current_op.src2.t->prefetch();
-                current_op.result->prefetch();
-                const auto &src2_shape = current_op.src2.t->shape();
+            case OperationId::MATMUL: {
+                const BoundTensor &src2_t = std::get<BoundTensor>(op.arg2);
+                src2_t.prefetch();
+                op.result.prefetch();
+                const auto &shape2 = src2_t.shape;
                 size_t M, N, K;
-                // Перемножение матриц M*N и N*K
-                if (src1_shape.size() >= 2 && src2_shape.size() >= 2) {
-                    M = src1_shape[src1_shape.size() - 2];
-                    N = src1_shape.back();
-                    K = src2_shape.back();
-                } else if (src2_shape.size() >= 2) {
+                if (shape1.size() >= 2 && shape2.size() >= 2) {
+                    M = shape1[shape1.size() - 2];
+                    N = shape1.back();
+                    K = shape2.back();
+                } else if (shape2.size() >= 2) {
                     M = 1;
-                    N = src1_shape.back();
-                    K = src2_shape.back();
+                    N = shape1.back();
+                    K = shape2.back();
                 } else {
-                    M = 1;
-                    N = src1_shape.back();
-                    K = 1;
+                    M = 1; N = shape1.back(); K = 1;
                 }
 
-                // Число элементов и число матриц
-                ptrdiff_t src2_num_elements = 1;
-                for (size_t i = 0; i < src2_shape.size(); ++i)
-                    src2_num_elements *= src2_shape[i];
+                ptrdiff_t n2 = 1;
+                for (size_t d : shape2) n2 *= d;
+                const size_t matrix1_sz = M * N;
+                const size_t matrix2_sz = N * K;
+                const size_t result_matrix_sz = M * K;
+                const size_t num_m1 = n1 / matrix1_sz;
+                const size_t num_m2 = n2 / matrix2_sz;
+                const size_t mega_blocks = num_m1 / num_m2;
 
-                const size_t matrix1_size = M * N;
-                const size_t matrix2_size = N * K;
-                const size_t result_matrix_size = M * K;
+                float *src2 = src2_t.start;
+                float *res = op.result.start;
 
-                const size_t num_matrices_src1 = src1_num_elements / matrix1_size;
-                const size_t num_matrices_src2 = src2_num_elements / matrix2_size;
-
-                // Циклически повторяем матрицы в src2
-                const size_t mega_blocks = num_matrices_src1 / num_matrices_src2;
-
-                float *src2_start = static_cast<float*>(current_op.src2.t->data());
-                float *res_start = static_cast<float*>(current_op.result->data());
-
-                // Параллельная обработка групп матриц
                 std::vector<size_t> mega_ids(mega_blocks);
                 std::iota(mega_ids.begin(), mega_ids.end(), 0);
                 std::for_each(std::execution::par, mega_ids.begin(), mega_ids.end(),
                               [&](size_t mb) {
-                                  const float *src1_mega = src1_start + mb * num_matrices_src2 * matrix1_size;
-                                  float *res_mega   = res_start   + mb * num_matrices_src2 * result_matrix_size;
-
-                                  for (size_t i = 0; i < num_matrices_src2; ++i) {
-                                      const float *A = src1_mega + i * matrix1_size;
-                                      const float *B = src2_start + i * matrix2_size;  // src2 всегда один и тот же набор
-                                      float *C       = res_mega   + i * result_matrix_size;
-
-                                      for (size_t row = 0; row < M; ++row) {
+                                  const float *src1_mega = src1 + mb * num_m2 * matrix1_sz;
+                                  float *res_mega = res + mb * num_m2 * result_matrix_sz;
+                                  for (size_t i = 0; i < num_m2; ++i) {
+                                      const float *A = src1_mega + i * matrix1_sz;
+                                      const float *B = src2 + i * matrix2_sz;
+                                      float *C = res_mega + i * result_matrix_sz;
+                                      for (size_t row = 0; row < M; ++row)
                                           for (size_t col = 0; col < K; ++col) {
                                               float sum = 0.0f;
-                                              for (size_t inner = 0; inner < N; ++inner) {
+                                              for (size_t inner = 0; inner < N; ++inner)
                                                   sum += A[row * N + inner] * B[inner * K + col];
-                                              }
                                               C[row * K + col] = sum;
                                           }
-                                      }
                                   }
-                              }
-                );
+                              });
                 break;
             }
 
-            case (OperationId::EXP):
-            case (OperationId::RELU):
-            case (OperationId::SIGMOID): {
-                current_op.result->prefetch();
+            case OperationId::EXP:
+            case OperationId::RELU:
+            case OperationId::SIGMOID:
+            case OperationId::TANH: {
+                op.result.prefetch();
                 std::function<float(float)> f;
-                switch (current_op.id) {
-                    case (OperationId::EXP): {
-                        f = [](float x) { return std::exp(x); };
-                        break;
-                    }
-                    case (OperationId::RELU): {
-                        f = [](float x) { return x > 0.0f ? x : 0.0f; };
-                        break;
-                    }
-                    case (OperationId::SIGMOID): {
-                        f = [](float x) { return 1.0f / (1.0f + std::exp(-x)); };
-                        break;
-                    }
+                switch (op.id) {
+                    case OperationId::EXP: f = [](float x) { return std::exp(x); }; break;
+                    case OperationId::RELU: f = [](float x) { return x > 0.0f ? x : 0.0f; }; break;
+                    case OperationId::SIGMOID: f = [](float x) { return 1.0f / (1.0f + std::exp(-x)); }; break;
+                    case OperationId::TANH: f = [](float x) { return std::tanh(x); }; break;
+                    default: break;
                 }
                 std::transform(std::execution::par_unseq,
-                               src1_start, src1_end,
-                               static_cast<float*>(current_op.result->data()),
-                               f);
+                               src1, src1 + n1, op.result.start, f);
                 break;
             }
+
+            default:
+                throw std::runtime_error("Unsupported operation in SimpleExecutor");
         }
     }
 }

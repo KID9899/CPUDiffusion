@@ -31,7 +31,7 @@ static void write_grayscale_png(const std::string& path, int w, int h, const flo
 // Основная функция
 void CpuDiffImages::save_images(const Tensor &t, const std::string& filename) {
     const std::vector<size_t> &shape = t.shape();
-    const float *data = static_cast<float*>(t.data());
+    const float *data = t.bind();
 
     if (!filename.ends_with(".png"))
         throw std::runtime_error("Only PNG format is supported");

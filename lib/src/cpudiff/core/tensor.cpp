@@ -4,9 +4,6 @@
 
 #include <optional>
 #include <sstream>
-#include <functional>
-#include <iomanip>
-#include <cmath>
 
 #include "graph.h"
 #include "tensor.h"
@@ -91,216 +88,172 @@ static std::optional<std::vector<size_t>> transpose_shape(
 
 // ============= БАЗОВЫЕ ФУНКЦИИ ТЕНЗОРОВ =============
 
-Tensor UniqueTensor::reference() {
-    return Tensor(this);
-}
-
-void UniqueTensor::dump(std::ostream &out) const {
-    out.write(name_.c_str(), name_.size());
-    out.put('\0');
-
-    size_t rank = shape_.size();
-    out.write(reinterpret_cast<const char*>(&rank), sizeof(rank));
-
-    out.write(reinterpret_cast<const char*>(shape_.data()), rank * sizeof(size_t));
-
-    size_t total = 1;
-    for (size_t d : shape_) total *= d;
-    const float* data_ptr = static_cast<const float*>(start);
-    out.write(reinterpret_cast<const char*>(data_ptr), total * sizeof(float) / sizeof(char));
-}
-
-void UniqueTensor::repr(std::ostream &out) const {
-    out << "name: \"" << name_ << "\"\n";
-
-    out << "shape: [";
-    for (size_t i = 0; i < shape_.size(); ++i) {
-        if (i > 0) out << ", ";
-        out << shape_[i];
-    }
-    out << "]\n\n";
-
-    size_t total = 1;
-    for (size_t d : shape_) total *= d;
-    const float* data = static_cast<const float*>(start);
-
-    size_t to_one_float = 1;
-    for (size_t i = 0; i < total; ++i) {
-        std::ostringstream oss;
-        oss << data[i];
-        to_one_float = std::max(to_one_float, oss.str().length());
-    }
-
-    std::function<void(size_t, size_t&, int)> print_dim = [&](size_t dim, size_t& index, int indent) {
-        // Индекс предпоследнего измерения
-        const size_t pre_last = shape_.size() >= 2 ? shape_.size() - 2 : 0;
-
-        if (dim == shape_.size() - 1) {
-            // Последнее измерение - печатаем числа в строку
-            out << "[";
-            for (size_t i = 0; i < shape_[dim]; ++i) {
-                if (i > 0) out << ", ";
-                out << std::setw(static_cast<int>(to_one_float)) << data[index++];
-            }
-            out << "]";
-        } else if (shape_.size() >= 2 && dim == pre_last) {
-            // Предпоследнее измерение: каждый элемент на новой строке
-            out << "[";
-            out << "\n";
-            for (size_t i = 0; i < shape_[dim]; ++i) {
-                out << std::string(indent + 4, ' ');
-                print_dim(dim + 1, index, indent + 4);
-                if (i != shape_[dim] - 1) {
-                    out << ",";
-                }
-                out << "\n";
-            }
-            out << std::string(indent, ' ') << "]";
-        } else {
-            // Более высокие измерения
-            out << "[";
-            if (shape_[dim] > 0) {
-                out << "\n" << std::string(indent + 4, ' ');
-                for (size_t i = 0; i < shape_[dim]; ++i) {
-                    if (i > 0) {
-                        out << ", ";
-                    }
-                    print_dim(dim + 1, index, indent + 4);
-                }
-                out << "\n" << std::string(indent, ' ') << "]";
-            } else {
-                out << "]";
-            }
-        }
-    };
-
-    size_t idx = 0;
-    print_dim(0, idx, 0);
-}
-
-Tensor &Tensor::operator<<(const std::vector<size_t> &shape) {
-    if (unique != nullptr && unique->start == nullptr) { graph()->alloc_promised(unique, shape); }
-    if (this->shape() != shape) throw std::runtime_error("It is not possible to set a size other than the current one");
-    return *this;
-}
-
-Tensor &Tensor::operator=(Tensor::CanAssign other) {
-    if (std::holds_alternative<TensorResult>(other)) {
-        TensorResult &res = std::get<TensorResult>(other);
-        if (graph() != res.src1->graph)
-            throw std::runtime_error("An attempt to link tensors from different computational graphs");
-        // В случае, если тензор обещанный
-        if (unique != nullptr && unique->start == nullptr) { graph()->alloc_promised(unique, res.shape); }
-        if (res.shape != shape())
-            throw std::runtime_error(
-                    "The dimensions of the recorded tensor " + shape_to_string(res.shape) + " and container " +
-                    shape_to_string(shape()) + " are different");
-        if (res.id == OperationId::MATMUL && (res.src1 == unique || res.src2.t == unique))
-            throw std::runtime_error(
-                    "You cannot perform non-piecemeal operations with writing the result to one of the arguments");
-        if (res.id == OperationId::COPY && res.src1 == unique)
-            throw std::runtime_error("It is forbidden to copy a tensor into itself");
-        graph()->add_operation(res.id, res.src1, res.src2, unique);
-    } else if (std::holds_alternative<TensorView>(other)) {
-        TensorView &view = std::get<TensorView>(other);
-        if (graph() != view.unique->graph)
-            throw std::runtime_error("An attempt to link tensors from different computational graphs");
-        // В случае, если тензор обещанный
-        if (unique->start == nullptr) {
-            unique->shape_ = view.new_shape;
-            unique->set_memory(view.unique->start, view.unique->end);
-        }
-        if (unique->start != view.unique->start)
-            throw std::runtime_error("It is not possible to assign a TensorView to a tensor bound to a memory location other than the one passed to TensorView");
-        else if (unique->shape() != view.new_shape)
-            throw std::runtime_error("It is not possible to assign a TensorView to a tensor that implements a different representation of this data (a different shape)");
-        graph()->add_operation(OperationId::VIEW, view.unique, {.t = nullptr}, unique);
-    }
-    return *this;
+float *Tensor::bind() const {
+    return graph->force_bind(*this, true);
 }
 
 
-void *Tensor::data() const {
-    if (!unique) throw std::runtime_error("An attempt to use an unloaded tensor");
-    return unique->data();
-}
-const std::vector<size_t> &Tensor::shape() const {
-    if (!unique) throw std::runtime_error("An attempt to use an unloaded tensor");
-    return unique->shape();
-}
-Graph *Tensor::graph() {
-    if (!unique) throw std::runtime_error("An attempt to use an unloaded tensor");
-    return unique->graph;
+// =============  АРИФМЕТИКА С ТЕНЗОРАМИ =============
+Tensor Tensor::operator+(const Tensor &other) const {
+    if (!id || !other.id) throw std::runtime_error("Empty tensor");
+    if (graph != other.graph) throw std::runtime_error("Different graphs");
+    if (!can_broadcast_shapes(shape_, other.shape_))
+        throw std::runtime_error("Incompatible shapes for ADD: " + shape_to_string(shape_) + " and " + shape_to_string(other.shape_));
+    return graph->add_operation(OperationId::ADD, *this, other, shape_);
 }
 
-void Tensor::dump(const char *filename) {
-    if (!unique) throw std::runtime_error("An attempt to use an unloaded tensor");
-    graph()->add_operation(OperationId::DUMP, unique, {.s = filename}, nullptr);
-}
-void Tensor::repr(const char *filename) {
-    if (!unique) throw std::runtime_error("An attempt to use an unloaded tensor");
-    graph()->add_operation(OperationId::REPR, unique, {.s = filename}, nullptr);
-}
-
-Tensor::Tensor(UniqueTensor *unique) : unique(unique) {}
-
-// ============= ВСЯКИЕ ОПЕРАЦИИ =============
-
-void Tensor::fill(float v) { this->operator=(TensorResult{OperationId::FILL, unique, {.f = v}, shape()}); }
-void Tensor::randn() { this->operator=(TensorResult{OperationId::RANDN, unique, {.t = nullptr}, shape()}); }
-TensorResult Tensor::copy() const { return {OperationId::COPY, unique, {.t = nullptr}, shape()}; }
-TensorResult Tensor::transpose() const {
-    auto res_shape = transpose_shape(shape());
-    if (!res_shape) throw std::runtime_error("It is impossible to transpose a tensor: " + shape_to_string(shape()));
-    return {OperationId::TRANSPOSE, unique, {.t = nullptr}, *res_shape};
+Tensor Tensor::operator-(const Tensor &other) const {
+    if (!id || !other.id) throw std::runtime_error("Empty tensor");
+    if (graph != other.graph) throw std::runtime_error("Different graphs");
+    if (!can_broadcast_shapes(shape_, other.shape_))
+        throw std::runtime_error("Incompatible shapes for SUB: " + shape_to_string(shape_) + " and " + shape_to_string(other.shape_));
+    return graph->add_operation(OperationId::SUB, *this, other, shape_);
 }
 
-
-TensorResult Tensor::operator+(Tensor other) const {
-    auto res_shape = can_broadcast_shapes(shape(), other.shape());
-    if (!res_shape) throw std::runtime_error("Incompatible shapes for element-wise addition: " + shape_to_string(shape()) + " and "  + shape_to_string(other.shape()));
-    return {OperationId::ADD, unique, {.t = other.unique}, shape()};
-}
-TensorResult Tensor::operator-(Tensor other) const {
-    auto res_shape = can_broadcast_shapes(shape(), other.shape());
-    if (!res_shape) throw std::runtime_error("Incompatible shapes for element-wise subtraction: " + shape_to_string(shape()) + " and "  + shape_to_string(other.shape()));
-    return {OperationId::SUB, unique, {.t = other.unique}, shape()};
-}
-TensorResult Tensor::operator-() const { return {OperationId::NEGATE, unique, {.t = nullptr}, shape()}; }
-
-TensorResult Tensor::operator*(Tensor other) const {
-    auto res_shape = can_broadcast_shapes(shape(), other.shape());
-    if (!res_shape) throw std::runtime_error("Incompatible shapes for element-wise multiplication: " + shape_to_string(shape()) + " and "  + shape_to_string(other.shape()));
-    return {OperationId::MUL, unique, {.t = other.unique}, shape()};
-}
-TensorResult Tensor::operator*(float other) const { return {OperationId::FMUL, unique, {.f = other}, shape()}; }
-TensorResult Tensor::operator/(Tensor other) const {
-    auto res_shape = can_broadcast_shapes(shape(), other.shape());
-    if (!res_shape) throw std::runtime_error("Incompatible shapes for element-wise division: " + shape_to_string(shape()) + " and "  + shape_to_string(other.shape()));
-    return {OperationId::DIV, unique, {.t = other.unique}, shape()};
-}
-TensorResult Tensor::operator/(float other) const { return {OperationId::FDIV, unique, {.f = other}, shape()}; }
-TensorResult Tensor::invert() const { return {OperationId::INVERT, unique, {.t = nullptr}, shape()}; }
-
-TensorResult Tensor::operator^(Tensor other) const {
-    auto res_shape = matmul_shape(shape(), other.shape());
-    if (!res_shape) throw std::runtime_error("Incompatible shapes for matrix multiplication: " + shape_to_string(shape()) + " and "  + shape_to_string(other.shape()));
-    return {OperationId::MATMUL, unique, {.t = other.unique}, *res_shape};
+Tensor Tensor::operator*(const Tensor &other) const {
+    if (!id || !other.id) throw std::runtime_error("Empty tensor");
+    if (graph != other.graph) throw std::runtime_error("Different graphs");
+    if (!can_broadcast_shapes(shape_, other.shape_))
+        throw std::runtime_error("Incompatible shapes for MUL: " + shape_to_string(shape_) + " and " + shape_to_string(other.shape_));
+    return graph->add_operation(OperationId::MUL, *this, other, shape_);
 }
 
-TensorResult Tensor::exp() const { return {OperationId::EXP, unique, {.t = nullptr}, shape()}; }
-TensorResult Tensor::relu() const { return {OperationId::RELU, unique, {.t = nullptr}, shape()}; }
-TensorResult Tensor::sigmoid() const { return {OperationId::SIGMOID, unique, {.t = nullptr}, shape()}; }
+Tensor Tensor::operator/(const Tensor &other) const {
+    if (!id || !other.id) throw std::runtime_error("Empty tensor");
+    if (graph != other.graph) throw std::runtime_error("Different graphs");
+    if (!can_broadcast_shapes(shape_, other.shape_))
+        throw std::runtime_error("Incompatible shapes for DIV: " + shape_to_string(shape_) + " and " + shape_to_string(other.shape_));
+    return graph->add_operation(OperationId::DIV, *this, other, shape_);
+}
 
-TensorView Tensor::view(const std::vector<size_t> &shape) const {
-    // общее количество элементов исходного тензора
-    size_t expected = 1;
-    for (size_t d : this->shape()) expected *= d;
+Tensor Tensor::operator^(const Tensor &other) const {
+    if (!id || !other.id) throw std::runtime_error("Empty tensor");
+    if (graph != other.graph) throw std::runtime_error("Different graphs");
+    auto opt_shape = matmul_shape(shape_, other.shape_);
+    if (!opt_shape)
+        throw std::runtime_error("Incompatible shapes for MATMUL: " + shape_to_string(shape_) + " and " + shape_to_string(other.shape_));
+    return graph->add_operation(OperationId::MATMUL, *this, other, *opt_shape);
+}
 
-    size_t known_product = 1;   // произведение известных размерностей
-    size_t infer_index = 0;     // позиция, где стоит 0
-    size_t infer_count = 0;     // сколько раз встретился 0
+// ============= АРИФМЕТИКА С FLOAT =============
 
+Tensor Tensor::operator+(float val) const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::FADD, *this, val, shape_);
+}
+
+Tensor Tensor::operator-(float val) const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::FSUB, *this, val, shape_);
+}
+
+Tensor Tensor::operator*(float val) const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::FMUL, *this, val, shape_);
+}
+
+Tensor Tensor::operator/(float val) const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::FDIV, *this, val, shape_);
+}
+
+// Свободные функции для float слева (только коммутативные)
+Tensor operator+(float val, const Tensor &t) { return t + val; }
+Tensor operator-(float val, const Tensor &t) {
+    if (std::abs(val) < 1e-5f) return -t;
+    return val + (-t);
+}
+Tensor operator*(float val, const Tensor &t) { return t * val; }
+Tensor operator/(float val, const Tensor &t) {
+    if (std::abs(val - 1) < 1e-5f) return t.invert();
+    return val * t.invert();
+}
+
+Tensor Tensor::pow(float val) const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::POW, *this, val, shape_);
+}
+
+// ============= УНАРНЫЕ ОПЕРАЦИИ =============
+
+Tensor Tensor::operator-() const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::NEGATE, *this, nullptr, shape_);
+}
+
+Tensor Tensor::invert() const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::INVERT, *this, nullptr, shape_);
+}
+
+Tensor Tensor::exp() const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::EXP, *this, nullptr, shape_);
+}
+
+Tensor Tensor::relu() const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::RELU, *this, nullptr, shape_);
+}
+
+Tensor Tensor::sigmoid() const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::SIGMOID, *this, nullptr, shape_);
+}
+
+Tensor Tensor::tanh() const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    return graph->add_operation(OperationId::TANH, *this, nullptr, shape_);
+}
+
+Tensor Tensor::transpose(int64_t dim0, int64_t dim1) const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    auto opt_shape = transpose_shape(shape_, dim0, dim1);
+    if (!opt_shape)
+        throw std::runtime_error("Invalid transpose dimensions");
+    return graph->add_operation(OperationId::TRANSPOSE, *this, nullptr, *opt_shape);
+}
+
+// ============= ОПЕРАЦИИ НА МЕСТЕ =============
+
+void Tensor::fill(float value) {
+    if (!id) throw std::runtime_error("Empty tensor");
+    graph->add_operation(OperationId::FILL, *this, value, shape_);
+}
+
+void Tensor::randn() {
+    if (!id) throw std::runtime_error("Empty tensor");
+    graph->add_operation(OperationId::RANDN, *this, nullptr, shape_);
+}
+
+void Tensor::repr(const char* filename) const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    graph->add_operation(OperationId::REPR, *this, filename, {});
+}
+
+void Tensor::dump(const char* filename) const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    graph->add_operation(OperationId::DUMP, *this, filename, {});
+}
+
+// ============= ОПЕРАЦИИ СОЗДАНИЯ ПОХОЖИХ =============
+
+Tensor Tensor::like() const {
+    return graph->add_operation(OperationId::LIKE, *this, nullptr, shape_);
+}
+
+
+// ============= ОПЕРАЦИИ РЕСТРУКТУРИРОВАНИЯ =============
+
+Tensor Tensor::view(const std::vector<size_t> &shape) const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    size_t total_elements = 1;
+    for (size_t d : shape_) total_elements *= d;
+
+    // Ищем ось для автоматического вывода
+    size_t known_product = 1;
+    size_t infer_index = 0;
+    size_t infer_count = 0;
     for (size_t i = 0; i < shape.size(); ++i) {
         if (shape[i] == 0) {
             infer_index = i;
@@ -310,44 +263,46 @@ TensorView Tensor::view(const std::vector<size_t> &shape) const {
         }
     }
 
+    std::vector<size_t> new_shape = shape;
     if (infer_count == 0) {
-        // без авто-размерности
-        size_t total = 1;
-        for (size_t d : shape) total *= d;
-        if (expected != total) {
+        // Проверяем точное совпадение числа элементов
+        size_t new_total = 1;
+        for (size_t d : new_shape) new_total *= d;
+        if (total_elements != new_total) {
             throw std::runtime_error(
-                    "Reinterpretation of the tensor is impossible because the transmitted "
-                    "and expected number of elements do not match: " +
-                    std::to_string(total) + " vs " + std::to_string(expected));
+                    "Cannot reshape tensor: total elements mismatch. "
+                    "Original: " + std::to_string(total_elements) +
+                    ", requested: " + std::to_string(new_total));
         }
-        return {unique, shape};
-    }
-    else if (infer_count == 1) {
-        // автоматически подсчитать одну размерность
-        if (known_product == 0 || expected % known_product != 0) {
+    } else if (infer_count == 1) {
+        // Автоматически выводим одну размерность
+        if (known_product == 0 || total_elements % known_product != 0) {
             throw std::runtime_error(
-                    "Cannot infer dimension: total elements " + std::to_string(expected) +
-                    " is not divisible by product of known dimensions " +
-                    std::to_string(known_product));
+                    "Cannot infer dimension: total elements " + std::to_string(total_elements) +
+                    " not divisible by product of known dimensions " + std::to_string(known_product));
         }
-        size_t inferred = expected / known_product;
-        std::vector<size_t> full_shape = shape;
-        full_shape[infer_index] = inferred;
-        return {unique, full_shape};
+        new_shape[infer_index] = total_elements / known_product;
+    } else {
+        throw std::runtime_error("Only one dimension can be inferred (multiple 0 found)");
     }
-    else {
-        throw std::runtime_error("Only one dimension can be inferred (multiple -1 found)");
-    }
+
+    // Создаём операцию в графе
+    return graph->add_operation(OperationId::VIEW, *this, nullptr, new_shape);
 }
-TensorView Tensor::flatten() const {
+Tensor Tensor::flatten() const {
     size_t second = 1;
     const std::vector<size_t> &s = shape();
     for (size_t i = 1; i < s.size(); ++i) second *= s[i];
     return view({0, second});
 }
 
+Tensor::Tensor(Graph *graph, const std::vector<size_t> &shape, const std::string &name) : graph(graph), id(++_TENSOR_ID), shape_(shape), name_(name) {
+    graph->names[id] = name;
+}
+const Tensor &Tensor::operator[](const std::string &name) const {
+    if (!id) throw std::runtime_error("Empty tensor");
+    name_ = name;
+    graph->names[id] = name;
+    return *this;
+}
 
-// ============= TensorResult =============
-
-TensorResult::TensorResult(OperationId id, const UniqueTensor *src1, GraphOperation::SecondArg src2, const std::vector<size_t> &shape)
-    : id(id), src1(src1), src2(src2), shape(shape) {}
