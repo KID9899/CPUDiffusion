@@ -2,19 +2,30 @@
 // Created by iliya on 5/21/26.
 //
 
-#include <cstdlib>
-#include <cstring>
-#include <numeric>
+#include <functional>
 #include <fstream>
+#include <ostream>
 #include <sstream>
-#include <unordered_map>
+#include <iomanip>
 
 #include "cpudiff/typeutils.h"
 #include "cpudiff/safetensors.h"
 
 #include "graph.h"
 
-static size_t total_elements(const std::vector<size_t> &shape) {
+static std::string shape_to_string(const std::vector<size_t>& s) {
+    std::stringstream ss;
+    ss << "[";
+    if (!s.empty()) ss << s[0];
+    for (size_t i = 1; i < s.size(); ++i) {
+        ss << ", " << s[i];
+    }
+    ss << "]";
+    return ss.str();
+}
+
+static size_t num_elements(const std::vector<size_t> &shape) {
+    if (shape.empty()) return 0;
     size_t ans = 1;
     for (const size_t &i: shape) {
         ans *= i;
@@ -22,268 +33,584 @@ static size_t total_elements(const std::vector<size_t> &shape) {
     return ans;
 }
 
-Graph::~Graph() {
-    for (auto& p : maped) {
-        free(p);
-    }
-}
-
-Tensor Graph::add_existing(void *start, void *end, const std::vector<size_t> &shape, const std::string &name, Dtype dtype) {
-    if (shape.empty()) throw std::runtime_error("It is impossible to create a tensor with an empty array of dimensions");
-    if (dtype == FloatDtype) {
-        tensors.push_back(std::make_unique<UniqueTensor>(this, shape, name));
-        tensors.back()->set_memory(start, end);
-        return tensors.back()->reference();
-    } else {
-        Tensor t = allocate(shape);
-        dtype_to_float(static_cast<float*>(t.data()), start, total_elements(shape), dtype);
-        return t;
-    }
-}
-
 Tensor Graph::allocate(const std::vector<size_t> &shape, const std::string &name) {
-    if (shape.empty()) throw std::runtime_error("It is impossible to create a tensor with an empty array of dimensions");
-    Tensor t = future(name);
-    alloc_promised(t.unique, shape);
+    if (compiled)
+        throw std::runtime_error("Cannot allocate in a compiled graph");
+    if (shape.empty())
+        throw std::runtime_error("Empty shape");
+    for (size_t d : shape)
+        if (d == 0)
+            throw std::runtime_error("Zero dimension in shape");
+
+    size_t nelem = num_elements(shape);
+    float* ptr = new float[nelem];      // выделяем
+    maped.push_back(ptr);               // владеем
+    usable[ptr] = nelem;                // доступный блок
+
+    Tensor t(this, shape, name);
+    bound[t.id] = ptr;
     return t;
 }
 
-void Graph::add_operation(OperationId id, const UniqueTensor *src1, GraphOperation::SecondArg src2, UniqueTensor *result) {
-    operations.emplace_back(id, src1, src2, result);
+Tensor Graph::link(float *data, const std::vector<size_t> &shape, const std::string &name) {
+    if (compiled)
+        throw std::runtime_error("Cannot link in a compiled graph");
+    if (!data)
+        throw std::runtime_error("Null data pointer");
+
+    size_t nelem = num_elements(shape);
+    usable[data] = nelem;               // доступный блок
+
+    Tensor t(this, shape, name);
+    bound[t.id] = data;
+    return t;
 }
 
-Tensor Graph::future(const std::string &name) {
-    tensors.push_back(std::make_unique<UniqueTensor>(this, std::vector<size_t>(), name));
-    return tensors.back()->reference();
-}
+float* Graph::force_bind(const Tensor &t, bool result) {
+    if (t.id == 0 || t.graph != this)
+        throw std::runtime_error("Cannot bind an empty or foreign tensor");
 
-void Graph::alloc_promised(UniqueTensor *tensor, const std::vector<size_t> &shape) {
-    if (shape.empty()) throw std::runtime_error("It is impossible to create a tensor with an empty array of dimensions");
-    if (tensor->data() != nullptr) throw std::runtime_error("It is impossible to allocate an existing tensor");
-    // Обновляем размеры тензора
-    tensor->shape_ = shape;
-
-    // Выделяем память
-    size_t num = total_elements(shape);
-    size_t alloc_bytes = num * sizeof(float);
-
-    void *new_data = malloc(alloc_bytes);
-    if (!new_data) throw std::bad_alloc();
-
-    // Заполняем нулями
-    std::memset(new_data, 0, alloc_bytes);
-
-    // Записываем выделенную память
-    maped.emplace_back(new_data);
-    void *new_end = static_cast<char*>(new_data) + alloc_bytes;
-
-    // Устанавливаем тензор в реальный
-    tensor->set_memory(new_data, new_end);
-}
-
-void Graph::dump_dot(const std::string &filename, const std::string &name) const {
-    std::ofstream ofs(filename);
-    if (!ofs.is_open()) {
-        throw std::runtime_error("Cannot open file: " + filename);
+    if (compiled && std::find(results.begin(), results.end(), t.id) == results.end()) {
+        throw std::runtime_error("Only the resulting tensors can be bound from a compiled graph");
+    } else if (result) {
+        results.insert(t.id);
     }
 
-    // Заголовок DOT-файла
-    ofs << "digraph G {\n";
-    ofs << "  rankdir=TB;\n";
-    ofs << "  node [fontname=\"" << name << "\"];\n\n";
+    auto it = bound.find(t.id);
+    if (it != bound.end())
+        return it->second;              // память уже есть
 
-    // -------- Уникальные тензоры --------
-    struct UniqueTensorInfo {
-        std::string id;
-        std::string name;
-        std::string dims;
+    // Памяти ещё нет – выделяем сейчас
+    size_t nelem = num_elements(t.shape_);
+    float* ptr = new float[nelem];
+    maped.push_back(ptr);               // владеем
+    usable[ptr] = nelem;                // доступный блок
+    bound[t.id] = ptr;
+    return ptr;
+}
+
+Graph::~Graph() {
+    if (current_graph == this) current_graph = nullptr;
+    for (void* ptr : maped)
+        ::operator delete(ptr);
+}
+
+void Graph::compile() {
+    if (compiled)
+        throw std::runtime_error("Graph already compiled");
+    if (promised.empty())
+        throw std::runtime_error("No operations to compile");
+
+    const size_t N = promised.size();
+
+    // Вычисляем время жизни каждого id
+    struct LifeInfo {
+        int last_use    = -1;
+        int creation_op = -1;
+    };
+    std::unordered_map<unsigned int, LifeInfo> life;
+
+    for (const auto& [id, ptr] : bound)
+        life[id];
+
+    for (size_t i = 0; i < N; ++i) {
+        const IncompleteOperation& op = promised[i];
+
+        auto update = [&](unsigned int arg_id) {
+            if (arg_id == 0) return;
+            LifeInfo& info = life[arg_id];
+            info.last_use = static_cast<int>(i);
+        };
+
+        update(op.arg1);
+        if (OperationGroups::arg2_is_tensor.contains(op.id))
+            update(std::get<unsigned int>(op.arg2));
+
+        if (!OperationGroups::no_result.contains(op.id) && op.result != 0)
+            life[op.result].creation_op = static_cast<int>(i);
+    }
+
+    // Храним пары (указатель, размер в float)
+    std::vector<std::pair<float*, size_t>> free_blocks;
+    std::unordered_set<float*> used_ptrs;
+    for (const auto& [id, ptr] : bound) used_ptrs.insert(ptr);
+    for (const auto& [ptr, sz] : usable) {
+        if (!used_ptrs.count(ptr))
+            free_blocks.emplace_back(ptr, sz);
+    }
+
+    // Ищем наименьший подходящий свобоный блок
+    auto best_fit_free = [&](size_t required) -> float* {
+        float* best_ptr = nullptr;
+        size_t best_size = SIZE_MAX;
+        size_t best_idx = 0;
+        for (size_t i = 0; i < free_blocks.size(); ++i) {
+            auto [ptr, sz] = free_blocks[i];
+            if (sz >= required && sz < best_size) {
+                best_ptr = ptr;
+                best_size = sz;
+                best_idx = i;
+            }
+        }
+        if (best_ptr) {
+            // Блок забирается целиком
+            free_blocks[best_idx] = free_blocks.back();
+            free_blocks.pop_back();
+        }
+        return best_ptr;
     };
 
-    // Группируем все тензоры по их указателю на память
-    std::unordered_map<void*, std::vector<const UniqueTensor*>> data_to_tensors;
-    for (const auto& t : tensors) {
-        if (t->data() == nullptr) continue;
-        data_to_tensors[t->data()].push_back(t.get());
-    }
+    // Основной проход по операциям
+    for (size_t i = 0; i < N; ++i) {
+        const IncompleteOperation& op = promised[i];
 
-    // Для каждого уникального тензора заполняем информацию и решаем, выносить ли в кластер
-    std::unordered_map<const UniqueTensor*, UniqueTensorInfo> utensor_info;
-
-    // Сначала формируем id и подписи для каждого тензора
-    for (const auto& [data_ptr, utensors] : data_to_tensors) {
-        for (const auto* ut : utensors) {
-            UniqueTensorInfo info;
-            info.id = "utensor_" + std::to_string(reinterpret_cast<uintptr_t>(ut));
-
-            // Если у тензора есть имя, берём его, иначе используем адрес данных
-            if (ut->name().empty()) {
-                std::stringstream ss;
-                ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(data_ptr);
-                info.name = ss.str();
-            } else {
-                info.name = ut->name();
-            }
-
-            // Размерность
-            info.dims = "[";
-            for (size_t i = 0; i < ut->shape().size(); ++i) {
-                if (i != 0) info.dims += ", ";
-                info.dims += std::to_string(ut->shape()[i]);
-            }
-            info.dims += "]";
-
-            utensor_info[ut] = info;
+        // Аргументы
+        BoundTensor arg1_bt;
+        if (op.arg1 != 0) {
+            auto it = bound.find(op.arg1);
+            if (it == bound.end())
+                throw std::runtime_error("Op " + std::to_string(i) + ": arg1 missing memory");
+            float* ptr = it->second;
+            arg1_bt = {ptr, ptr + usable.at(ptr), op.arg1_shape};
         }
-    }
 
-    // -------- Отрисовка групп и одиночных узлов --------
-    for (const auto& [data_ptr, utensors] : data_to_tensors) {
-        if (utensors.size() > 1) {
-            // Кластер с пунктирной рамкой
-            ofs << "  subgraph cluster_" << std::hex << reinterpret_cast<uintptr_t>(data_ptr) << " {\n";
-            ofs << "    style=solid;\n";
-            ofs << "    color=red;\n";
-            for (const auto* ut : utensors) {
-                const auto& info = utensor_info[ut];
-                ofs << "    " << info.id
-                    << " [shape=box, style=dashed, color=red, fontcolor=red, label=\""
-                    << info.name << "\\n" << info.dims << "\"];\n";
-            }
-            ofs << "  }\n";
+        CompleteOperation::ARG2_t arg2_val;
+        if (OperationGroups::arg2_is_tensor.contains(op.id)) {
+            unsigned int a2 = std::get<unsigned int>(op.arg2);
+            if (a2 == 0) throw std::runtime_error("Null tensor arg2");
+            auto it = bound.find(a2);
+            if (it == bound.end())
+                throw std::runtime_error("Op " + std::to_string(i) + ": arg2 missing memory");
+            float* ptr = it->second;
+            arg2_val = BoundTensor{ptr, ptr + usable.at(ptr), op.arg2_shape};
+        } else if (OperationGroups::arg2_is_float.contains(op.id)) {
+            arg2_val = std::get<float>(op.arg2);
+        } else if (OperationGroups::arg2_is_string.contains(op.id)) {
+            arg2_val = std::get<const char*>(op.arg2);
         } else {
-            // Один тензор - просто узел без кластера
-            const auto* ut = utensors[0];
-            const auto& info = utensor_info[ut];
-            ofs << "  " << info.id
-                << " [shape=box, style=solid, color=red, fontcolor=red, label=\""
-                << info.name << "\\n" << info.dims << "\"];\n";
-        }
-    }
-    ofs << "\n";
-
-    // -------- Операции и узлы-ссылки --------
-    std::unordered_map<const UniqueTensor*, int> ref_counters;    // счётчики на каждый уникальный тензор
-    std::vector<std::tuple<std::string, std::string>> references; // пунктирные рёбра
-    std::vector<std::tuple<std::string, std::string>> edges;      // нормальные рёбра
-
-    // Лямбда, создающая (или возвращающая существующую) ссылку на уникальный тензор
-    auto get_or_create_ref = [&](const UniqueTensor* t, bool get_new) -> std::string {
-        if (!t || !t->data()) return "";
-
-        auto it_info = utensor_info.find(t);
-        if (it_info == utensor_info.end()) {
-            throw std::runtime_error("A reference to a tensor that does not belong to a graph");
-        }
-        const std::string& master_id = it_info->second.id;
-
-        // Переиспользуем ссылку, если тензор не менялся
-        if (ref_counters.find(t) == ref_counters.end()) {
-            ref_counters[t] = 0;
-        } else if (!get_new) {
-            int count = ref_counters[t] - 1;
-            return "ref_" + std::to_string(reinterpret_cast<uintptr_t>(t))
-                   + "_" + std::to_string(count);
-        }
-
-        int count = ref_counters[t]++;
-        std::string ref_id = "ref_" + std::to_string(reinterpret_cast<uintptr_t>(t))
-                             + "_" + std::to_string(count);
-
-        // Узел-ссылка
-        ofs << "  " << ref_id << " [shape=box, label=\""
-            << it_info->second.name << "\\n" << it_info->second.dims << "\"];\n";
-
-        // Пунктир от уникального тензора к ссылке
-        references.emplace_back(master_id, ref_id);
-        return ref_id;
-    };
-
-    size_t op_idx = 0;
-    for (const auto& op : operations) {
-        std::string op_id = "op_" + std::to_string(op_idx++);
-        std::string op_label = operation_name(op.id);
-        if (op.id == OperationId::FMUL || op.id == OperationId::FDIV)
-            op_label += std::to_string(op.src2.f);
-
-        ofs << "  " << op_id << " [shape=diamond, label=\"" << op_label << "\"];\n";
-
-        // Первый операнд
-        if (op.src1) {
-            std::string ref = get_or_create_ref(op.src1, false);
-            if (!ref.empty()) edges.emplace_back(ref, op_id);
-        }
-
-        // Второй операнд
-        if (op.id == OperationId::ADD || op.id == OperationId::SUB ||
-            op.id == OperationId::MUL || op.id == OperationId::DIV ||
-            op.id == OperationId::MATMUL) {
-            if (op.src2.t) {
-                std::string ref = get_or_create_ref(op.src2.t, false);
-                if (!ref.empty()) edges.emplace_back(ref, op_id);
-            }
+            arg2_val = BoundTensor{};
         }
 
         // Результат
-        if (op.result) {
-            std::string ref = get_or_create_ref(op.result, true);
-            if (!ref.empty()) edges.emplace_back(op_id, ref);
+        BoundTensor result_bt;
+        if (OperationGroups::no_result.contains(op.id)) {
+            // операции без результата
+            result_bt = arg1_bt;
+        } else {
+            unsigned int res_id = op.result;
+            size_t required = num_elements(op.result_shape);
+            float* res_ptr = nullptr;
+
+            if (OperationGroups::must_reuse_arg1.contains(op.id)) {
+                // Результат обязан использовать ту же память, что и arg1
+                auto it = bound.find(op.arg1);
+                if (it == bound.end())
+                    throw std::runtime_error("Op " + std::to_string(i) + ": arg1 has no memory for but it must reuse arg1");
+                res_ptr = it->second;
+                // Привязываем результат к той же памяти
+                bound[op.result] = res_ptr;
+            } else {
+                auto bound_it = bound.find(res_id);
+                if (bound_it != bound.end()) {
+                    // Память уже выделена
+                    res_ptr = bound_it->second;
+                    if (usable.at(res_ptr) < required)
+                        throw std::runtime_error("Pre-bound result too small");
+                } else {
+                    // 1) Переиспользование аргумента, если разрешено
+                    if (OperationGroups::may_reuse_args.contains(op.id)) {
+                        auto try_reuse = [&](unsigned int cand_id) -> bool {
+                            if (cand_id == 0) return false;
+                            LifeInfo &l = life[cand_id];
+                            if (l.last_use != static_cast<int>(i)) return false;
+                            if (results.count(cand_id)) return false;
+                            float *cand_ptr = bound.at(cand_id);
+                            size_t cand_size = usable.at(cand_ptr);
+                            if (cand_size != required) return false;  // только точное совпадение
+                            // Забираем блок
+                            bound[res_id] = cand_ptr;
+                            res_ptr = cand_ptr;
+                            return true;
+                        };
+                        // Пробуем arg1, потом arg2
+                        if (!try_reuse(op.arg1) && OperationGroups::arg2_is_tensor.contains(op.id))
+                            try_reuse(std::get<unsigned int>(op.arg2));
+                    }
+
+                    // 2) Поиск среди свободных блоков
+                    if (!res_ptr) {
+                        res_ptr = best_fit_free(required);
+                        if (res_ptr) {
+                            bound[res_id] = res_ptr;
+                        }
+                    }
+
+                    // 3) Новая память
+                    if (!res_ptr) {
+                        res_ptr = new float[required];
+                        maped.push_back(res_ptr);
+                        usable[res_ptr] = required;
+                        bound[res_id] = res_ptr;
+                    }
+                }
+            }
+            result_bt = {res_ptr, res_ptr + required, op.result_shape};
+        }
+
+        // Готовая операция
+        CompleteOperation comp_op{op.id, arg1_bt, arg2_val, result_bt};
+        operations.push_back(comp_op);
+
+        // Освобождение аргументов, которые больше не нужны
+        auto release = [&](unsigned int arg_id) {
+            if (arg_id == 0) return;
+            // Не освобождаем, если это финальный тензор или использован в будущем
+            if (life[arg_id].last_use != static_cast<int>(i)) return;
+            if (results.count(arg_id)) return;
+            auto it = bound.find(arg_id);
+            if (it == bound.end()) return;
+            float* ptr = it->second;
+            size_t sz = usable.at(ptr);
+            free_blocks.emplace_back(ptr, sz);
+        };
+
+        release(op.arg1);
+        if (OperationGroups::arg2_is_tensor.contains(op.id))
+            release(std::get<unsigned int>(op.arg2));
+    }
+
+    compiled = true;
+}
+
+void Graph::repr_compiled(std::ostream& os) const {
+    if (!compiled)
+        throw std::runtime_error("Graph must be compiled before repr_compiled");
+
+    // Собираем все указатели, участвующие в операциях
+    std::vector<const float*> ptr_order;
+    std::unordered_map<const float*, int> ptr_to_num;
+    auto get_num = [&](const float* p) -> int {
+        if (!p) return 0;
+        auto it = ptr_to_num.find(p);
+        if (it == ptr_to_num.end()) {
+            int num = static_cast<int>(ptr_order.size()) + 1;
+            ptr_order.push_back(p);
+            ptr_to_num[p] = num;
+            return num;
+        }
+        return it->second;
+    };
+
+    for (const auto& op : operations) {
+        get_num(op.arg1.start);
+        if (auto* bt = std::get_if<BoundTensor>(&op.arg2)) {
+            get_num(bt->start);
+        }
+        get_num(op.result.start);
+    }
+
+    // Была ли запись в этот участок памяти
+    std::unordered_set<const float*> defined;
+
+    // Указатель ещё не определён
+    auto ensure_defined = [&](const float* p) {
+        if (!p) return;
+        if (defined.find(p) == defined.end()) {
+            os << "use [" << get_num(p) << "]\n";
+            defined.insert(p);
+        }
+    };
+
+    // Выводим операции
+    for (const auto& op : operations) {
+        const float* arg1_ptr = op.arg1.start;
+        ensure_defined(arg1_ptr);
+
+        const float* arg2_ptr = nullptr;
+        bool arg2_is_tensor = false;
+        if (auto* bt = std::get_if<BoundTensor>(&op.arg2)) {
+            arg2_ptr = bt->start;
+            arg2_is_tensor = true;
+            ensure_defined(arg2_ptr);
+        }
+
+        const float* res_ptr = op.result.start;
+        const bool has_result = !OperationGroups::no_result.contains(op.id);
+
+        // Вывод левой части, если есть
+        if (has_result) {
+            os << "[" << get_num(res_ptr) << "] = ";
+        }
+
+        // Вывод операции
+        if (OperationGroups::arg2_is_float.contains(op.id)) {
+            float val = std::get<float>(op.arg2);
+            os << "[" << get_num(arg1_ptr) << "] " << operation_name(op.id) << " " << val << "\n";
+        }
+        else if (OperationGroups::arg2_is_string.contains(op.id)) {
+            const char* str = std::get<const char*>(op.arg2);
+            os << operation_name(op.id) << " [" << get_num(arg1_ptr) << "] to \"" << str << "\"\n";
+        }
+        else if (OperationGroups::arg2_is_tensor.contains(op.id)) {
+            os << "[" << get_num(arg1_ptr) << "] " << operation_name(op.id) << " [" << get_num(arg2_ptr) << "]\n";
+        }
+        else if (OperationGroups::arg2_is_null.contains(op.id)) {
+            os << operation_name(op.id) << " [" << get_num(arg1_ptr) << "]\n";
+        }
+        else {
+            os << "? unknown operation\n";
+        }
+
+        // После операции результат становится определённым
+        if (has_result) {
+            defined.insert(res_ptr);
         }
     }
 
-    // Отрисовываем пунктирные рёбра
-    for (const auto& [from, to] : references) {
-        ofs << "  " << from << " -> " << to << " [style=dashed, color=red];\n";
+    // Вывод result для финальных тензоров
+    for (unsigned int res_id : results) {
+        auto it = bound.find(res_id);
+        if (it != bound.end()) {
+            const float* ptr = it->second;
+            if (ptr && defined.count(ptr)) {
+                os << "result [" << get_num(ptr) << "]\n";
+            }
+        }
     }
-    // Отрисовываем обычные рёбра
-    for (const auto& [from, to] : edges) {
-        ofs << "  " << from << " -> " << to << ";\n";
+}
+
+void Graph::repr_compiled(const char* filename) const {
+    std::ofstream out(filename);
+    if (!out)
+        throw std::runtime_error(std::string("Cannot open file: ") + filename);
+    repr_compiled(out);
+}
+
+
+void Graph::repr(const std::string &filename, const std::string &fontname) const {
+    std::ofstream ofs(filename);
+    if (!ofs) throw std::runtime_error("Cannot open file: " + filename);
+
+    ofs << "digraph G {\n";
+    ofs << "  rankdir=TB;\n";
+    ofs << "  node [fontname=\"" << fontname << "\"];\n\n";
+
+    // Информация о тензорах
+    struct TensorInfo {
+        std::vector<size_t> shape;
+        bool is_result = false;
+        bool is_initial = false;
+    };
+    std::unordered_map<unsigned int, TensorInfo> tinfo;
+
+    // Регистрируем все id из promised
+    for (const auto& op : promised) {
+        if (op.arg1) tinfo[op.arg1];
+        if (OperationGroups::arg2_is_tensor.contains(op.id))
+            tinfo[std::get<unsigned int>(op.arg2)];
+        if (!OperationGroups::no_result.contains(op.id) && op.result)
+            tinfo[op.result];
+    }
+
+    // Операции
+    for (const auto& op : promised) {
+        if (op.arg1) tinfo[op.arg1].shape = op.arg1_shape;
+        if (OperationGroups::arg2_is_tensor.contains(op.id)) {
+            unsigned int a2 = std::get<unsigned int>(op.arg2);
+            if (a2) tinfo[a2].shape = op.arg2_shape;
+        }
+        if (!OperationGroups::no_result.contains(op.id) && op.result)
+            tinfo[op.result].shape = op.result_shape;
+    }
+
+    // Начальные: используются до первой записи
+    std::unordered_set<unsigned int> written;
+    for (const auto& op : promised) {
+        auto check = [&](unsigned int id) {
+            if (id && written.find(id) == written.end())
+                tinfo[id].is_initial = true;
+        };
+        check(op.arg1);
+        if (OperationGroups::arg2_is_tensor.contains(op.id))
+            check(std::get<unsigned int>(op.arg2));
+
+        if (!OperationGroups::no_result.contains(op.id) && op.result)
+            written.insert(op.result);
+        else if (op.id == OperationId::FILL || op.id == OperationId::RANDN)
+            written.insert(op.arg1);
+    }
+
+    // Конечные - только те, что в results
+    for (unsigned int rid : results)
+        if (tinfo.count(rid)) tinfo[rid].is_result = true;
+
+    // Узлы тензоров с заливкой
+    for (const auto& [id, info] : tinfo) {
+        std::stringstream label;
+        auto it = names.find(id);
+        if (it == names.end()) {
+            label << "id:" << id;
+        } else {
+            label << it->second;
+        }
+        label << "\\n" << shape_to_string(info.shape);
+        std::string fillcolor = "white";
+        if (info.is_initial) {
+            fillcolor = "pink";
+        } else if (info.is_result) {
+            fillcolor = "lightgreen";
+        }
+        ofs << "  tensor_" << id
+            << " [shape=box, style=filled, fillcolor=" << fillcolor
+            << ", label=\"" << label.str() << "\"];\n";
+    }
+
+    // Операции и рёбра
+    for (size_t idx = 0; idx < promised.size(); ++idx) {
+        const auto& op = promised[idx];
+        std::string op_id = "op_" + std::to_string(idx);
+        std::string op_label = operation_name(op.id);
+
+        if (OperationGroups::arg2_is_float.contains(op.id)) {
+            float val = std::get<float>(op.arg2);
+            std::stringstream ss;
+            ss << " " << val;
+            op_label += ss.str();
+        } else if (OperationGroups::arg2_is_string.contains(op.id)) {
+            op_label += " \\\"" + std::string(std::get<const char*>(op.arg2)) + "\\\"";
+        }
+
+        ofs << "  " << op_id << " [shape=diamond, label=\"" << op_label << "\"];\n";
+
+        if (op.arg1)
+            ofs << "  tensor_" << op.arg1 << " -> " << op_id << ";\n";
+        if (OperationGroups::arg2_is_tensor.contains(op.id)) {
+            unsigned int a2 = std::get<unsigned int>(op.arg2);
+            if (a2)
+                ofs << "  tensor_" << a2 << " -> " << op_id << ";\n";
+        }
+        if (!OperationGroups::no_result.contains(op.id) && op.result)
+            ofs << "  " << op_id << " -> tensor_" << op.result << ";\n";
+    }
+
+    // Блоки памяти и привязки
+    if (compiled) {
+        // Собираем уникальные блоки из bound
+        std::unordered_map<float*, size_t> blocks;
+        for (const auto& [id, ptr] : bound)
+            blocks[ptr] = usable.at(ptr);
+
+        for (const auto& [ptr, sz] : blocks) {
+            std::string block_id =
+                    "block_" + std::to_string(reinterpret_cast<uintptr_t>(ptr));
+            std::stringstream label;
+            label << "0x" << std::hex << reinterpret_cast<uintptr_t>(ptr)
+                  << "\\n" << std::dec << sz << " floats";
+            ofs << "  " << block_id
+                << " [shape=box, style=filled, fillcolor=lightblue, label=\""
+                << label.str() << "\"];\n";
+
+            // Пунктирные стрелки от тензоров к блоку
+            for (const auto& [tid, tptr] : bound) {
+                if (tptr == ptr && tinfo.count(tid))
+                    ofs << "  tensor_" << tid << " -> " << block_id
+                        << " [style=dashed, color=blue];\n";
+            }
+        }
     }
 
     ofs << "}\n";
-    ofs.close();
 }
 
-Tensor Graph::link(float* data, const std::vector<size_t>& shape, const std::string& name) {
-    if (shape.empty()) throw std::runtime_error("It is impossible to create a tensor with an empty array of dimensions");
-    return add_existing(
-            static_cast<void*>(data), static_cast<void*>(data + static_cast<ptrdiff_t>(total_elements(shape))), shape, name
-    );
+void BoundTensor::repr(std::ostream &out) const {
+    out << "shape: [";
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (i > 0) out << ", ";
+        out << shape[i];
+    }
+    out << "]\n\n";
+
+    size_t total = num_elements(shape);
+    const float* data = start;
+
+    // Определяем ширину поля для выравнивания
+    size_t max_width = 1;
+    for (size_t i = 0; i < total; ++i) {
+        std::ostringstream oss;
+        oss << data[i];
+        max_width = std::max(max_width, oss.str().length());
+    }
+
+    std::function<void(size_t, size_t&, int)> print_dim = [&](size_t dim, size_t& index, int indent) {
+        const size_t pre_last = shape.size() >= 2 ? shape.size() - 2 : 0;
+
+        if (dim == shape.size() - 1) {
+            out << "[";
+            for (size_t i = 0; i < shape[dim]; ++i) {
+                if (i > 0) out << ", ";
+                out << std::setw(static_cast<int>(max_width)) << data[index++];
+            }
+            out << "]";
+        } else if (shape.size() >= 2 && dim == pre_last) {
+            out << "[";
+            out << "\n";
+            for (size_t i = 0; i < shape[dim]; ++i) {
+                out << std::string(indent + 4, ' ');
+                print_dim(dim + 1, index, indent + 4);
+                if (i != shape[dim] - 1) out << ",";
+                out << "\n";
+            }
+            out << std::string(indent, ' ') << "]";
+        } else {
+            out << "[";
+            if (shape[dim] > 0) {
+                out << "\n" << std::string(indent + 4, ' ');
+                for (size_t i = 0; i < shape[dim]; ++i) {
+                    if (i > 0) out << ", ";
+                    print_dim(dim + 1, index, indent + 4);
+                }
+                out << "\n" << std::string(indent, ' ') << "]";
+            } else {
+                out << "]";
+            }
+        }
+    };
+
+    size_t idx = 0;
+    print_dim(0, idx, 0);
 }
 
-Tensor Graph::load(const std::string& filename) {
+void BoundTensor::dump(std::ostream &out) const {
+    size_t rank = shape.size();
+    out.write(reinterpret_cast<const char*>(&rank), sizeof(rank));
+    out.write(reinterpret_cast<const char*>(shape.data()), rank * sizeof(size_t));
+
+    size_t total = num_elements(shape);
+    const float* data_ptr = start;
+    out.write(reinterpret_cast<const char*>(data_ptr), total * sizeof(float));
+}
+
+Tensor Graph::load(const std::string &filename, const std::string &name) {
     std::ifstream in(filename, std::ios::binary);
-    if (!in) {
-        throw std::runtime_error("Graph::load: cannot open file " + filename);
-    }
-
-    // Чтение имени
-    std::string name;
-    char ch;
-    while (in.get(ch) && ch != '\0') {
-        name.push_back(ch);
-    }
-    if (!in) {
-        throw std::runtime_error("Graph::load: unexpected end of file while reading tensor name");
-    }
+    if (!in) throw std::runtime_error("Graph::load: cannot open file " + filename);
 
     // Чтение ранга
     size_t rank;
     in.read(reinterpret_cast<char*>(&rank), sizeof(rank));
-    if (!in) {
-        throw std::runtime_error("Graph::load: failed to read rank");
-    }
+    if (!in) throw std::runtime_error("Graph::load: failed to read rank");
 
     // Чтение размерностей
     std::vector<size_t> shape(rank);
     in.read(reinterpret_cast<char*>(shape.data()), rank * sizeof(size_t));
-    if (!in) {
-        throw std::runtime_error("Graph::load: failed to read shape");
-    }
+    if (!in) throw std::runtime_error("Graph::load: failed to read shape");
 
-    size_t num_elements = total_elements(shape);
+    size_t total = num_elements(shape);
+
+    // Создаём тензор
     Tensor t = allocate(shape, name);
-    float* data = static_cast<float*>(t.data());
-    in.read(reinterpret_cast<char*>(data), num_elements * sizeof(float));
+    // Получаем указатель на данные
+    float* data = bound.at(t.id);
+    in.read(reinterpret_cast<char*>(data), total * sizeof(float));
     if (!in) throw std::runtime_error("Graph::load: failed to read tensor data");
 
     return t;

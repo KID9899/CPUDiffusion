@@ -14,14 +14,10 @@
 
 using json = nlohmann::json;
 
-SafeTensorsFile::SafeTensorsFile(const std::string &path, Graph *graph): graph(graph) {
-    // 1. Открыть файл
+SafeTensorsFile::SafeTensorsFile(const std::string &path, Graph *graph) : graph(graph) {
     int fd = open(path.c_str(), O_RDONLY);
-    if (fd == -1) {
-        throw std::runtime_error("Cannot open file: " + path);
-    }
+    if (fd == -1) throw std::runtime_error("Cannot open file: " + path);
 
-    // 2. Узнать размер файла
     struct stat st;
     if (fstat(fd, &st) == -1) {
         close(fd);
@@ -33,45 +29,33 @@ SafeTensorsFile::SafeTensorsFile(const std::string &path, Graph *graph): graph(g
         throw std::runtime_error("File too small to be a valid safetensors file");
     }
 
-    // 3. Отобразить файл целиком в память (только на чтение)
     void *mapped = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (mapped == MAP_FAILED) {
-        close(fd);
-        throw std::runtime_error("mmap failed for file: " + path);
-    }
-
-    // Закрываем файл после всего
     close(fd);
+    if (mapped == MAP_FAILED) throw std::runtime_error("mmap failed for file: " + path);
 
-    // 4. Прочитать размер JSON-заголовка (первые 8 байт)
     uint64_t header_size;
     std::memcpy(&header_size, mapped, sizeof(header_size));
-    // safetensors использует little-endian, поэтому предполагаем, что платформа little-endian
     if (header_size > file_size - 8) {
         munmap(mapped, file_size);
         throw std::runtime_error("Header size exceeds file size");
     }
 
-    // 5. Извлечь JSON-строку (начинается сразу после 8 байт размера)
     const char *json_start = static_cast<const char*>(mapped) + 8;
     std::string json_str(json_start, header_size);
 
-    // 6. Парсим JSON
     json root = json::parse(json_str);
-    // Там что-то типа {"tensor_name": {"dtype": string, "shape": [size..], "data_offsets": [uint64, uint64]}...}
     if (!root.is_object()) {
         munmap(mapped, file_size);
-        throw std::runtime_error("Invalid safetensors header: top-level must be an object");
+        throw std::runtime_error("Invalid safetensors header");
     }
 
-    // Смещение в файле, откуда начинаются данные тензоров
     const size_t data_section_offset = 8 + header_size;
-    // Указатель на начало секции данных внутри отображения
-    char *data_base = static_cast<char*>(mapped) + data_section_offset;
+    const char *data_base = static_cast<const char*>(mapped) + data_section_offset;
 
-    // 7. Проходимся по тензорам
+    // Обход тензоров
     for (auto &[tensor_name, tensor_info] : root.items()) {
-        if (!tensor_name.empty() && tensor_name == "__metadata__") continue;
+        if (tensor_name == "__metadata__") continue;
+
         if (!tensor_info.contains("dtype") ||
             !tensor_info.contains("shape") ||
             !tensor_info.contains("data_offsets")) {
@@ -84,10 +68,7 @@ SafeTensorsFile::SafeTensorsFile(const std::string &path, Graph *graph): graph(g
 
         std::vector<uint64_t> shape_uint64 = tensor_info["shape"].get<std::vector<uint64_t>>();
         std::vector<size_t> shape;
-        for (const auto &i: shape_uint64) {
-            if (!std::cmp_less_equal(i, SIZE_MAX)) throw std::overflow_error("The tensor data size overflows the size_t type");
-            shape.push_back(i);
-        }
+        for (auto s : shape_uint64) shape.push_back(static_cast<size_t>(s));
 
         auto offsets = tensor_info["data_offsets"].get<std::vector<uint64_t>>();
         if (offsets.size() != 2) {
@@ -101,23 +82,34 @@ SafeTensorsFile::SafeTensorsFile(const std::string &path, Graph *graph): graph(g
             throw std::runtime_error("Invalid data offsets for tensor: " + tensor_name);
         }
 
-        // Заполняем TensorHeader
-        Tensor th = graph->add_existing(static_cast<void*>(data_base + start_off), static_cast<void*>(data_base + end_off), std::move(shape), tensor_name, dtype);
+        const void *src_ptr = data_base + start_off;
+        size_t byte_size = static_cast<size_t>(end_off - start_off);
+        size_t nelem = 1;
+        for (auto d : shape) nelem *= d;
 
-        // Сохраняем в наш класс
+        Tensor tensor;
+        if (dtype == FloatDtype) {
+            // Выделяем память в графе и копируем данные
+            tensor = graph->allocate(shape, tensor_name);
+            float *dst = graph->force_bind(tensor, false);
+            // Проверка размера
+            if (byte_size != nelem * sizeof(float)) {
+                munmap(mapped, file_size);
+                throw std::runtime_error("Data size mismatch for float tensor: " + tensor_name);
+            }
+            std::memcpy(dst, src_ptr, byte_size);
+        } else {
+            // Преобразование типа
+            tensor = graph->allocate(shape, tensor_name);
+            float *dst = graph->force_bind(tensor);
+            dtype_to_float(dst, src_ptr, nelem, dtype);
+        }
+
         size_t idx = tensors_.size();
-        tensors_.push_back(th);
+        tensors_.push_back(tensor);
         names_.push_back(tensor_name);
         name_to_idx_[tensor_name] = idx;
     }
 
-    // Сохраняем указатель и размер маппинга
-    mmap_ptr_  = mapped;
-    mmap_size_ = file_size;
-}
-
-SafeTensorsFile::~SafeTensorsFile() {
-    if (mmap_ptr_ != nullptr && mmap_ptr_ != MAP_FAILED) {
-        munmap(mmap_ptr_, mmap_size_);
-    }
+    munmap(mapped, file_size);
 }
