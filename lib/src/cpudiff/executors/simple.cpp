@@ -2,7 +2,6 @@
 // Created by iliya on 5/23/26.
 //
 
-#include <algorithm>
 #include <execution>
 #include <fstream>
 #include <random>
@@ -13,15 +12,19 @@
 #include "simple.h"
 
 const std::unordered_set<OperationId> &SimpleExecutor::getSupportedOperation() const {
+    using enum OperationId;
     static std::unordered_set<OperationId> supported = {
-            OperationId::FILL, OperationId::RANDN,
-            OperationId::TRANSPOSE,
-            OperationId::VIEW, OperationId::REPR, OperationId::DUMP,
-            OperationId::ADD, OperationId::SUB, OperationId::MUL, OperationId::DIV,
-            OperationId::FADD, OperationId::FSUB, OperationId::FMUL, OperationId::FDIV,
-            OperationId::NEGATE, OperationId::INVERT,
-            OperationId::MATMUL,
-            OperationId::EXP, OperationId::RELU, OperationId::SIGMOID, OperationId::TANH
+            FILL, RANDN,
+            VIEW, LIKE,
+            GATHER,
+            TRANSPOSE,
+            REPR, DUMP,
+            ADD, SUB, FADD, FSUB,
+            MUL, DIV, FMUL, FDIV,
+            NEGATE, INVERT,
+            MATMUL,
+            EXP, RELU, SIGMOID, TANH, POW,
+            REPEAT
     };
     return supported;
 }
@@ -32,7 +35,7 @@ void SimpleExecutor::execute() const {
         op.arg1.prefetch();
 
         const auto &shape1 = op.arg1.shape;
-        ptrdiff_t n1 = 1;
+        size_t n1 = 1;
         for (size_t d : shape1) n1 *= d;
         float *src1 = op.arg1.start;
 
@@ -73,7 +76,7 @@ void SimpleExecutor::execute() const {
             }
 
             case OperationId::VIEW:
-                break;
+            case OperationId::LIKE: break;
 
             case OperationId::REPR:
             case OperationId::DUMP: {
@@ -92,11 +95,11 @@ void SimpleExecutor::execute() const {
             case OperationId::SUB:
             case OperationId::MUL:
             case OperationId::DIV: {
-                const BoundTensor &src2_t = std::get<BoundTensor>(op.arg2);
+                const auto &src2_t = std::get<BoundTensor>(op.arg2);
                 src2_t.prefetch();
                 op.result.prefetch();
                 const auto &shape2 = src2_t.shape;
-                ptrdiff_t n2 = 1;
+                size_t n2 = 1;
                 for (size_t d : shape2) n2 *= d;
                 float *src2 = src2_t.start;
                 float *res = op.result.start;
@@ -121,9 +124,10 @@ void SimpleExecutor::execute() const {
             case OperationId::FMUL:
             case OperationId::FDIV:
             case OperationId::NEGATE:
-            case OperationId::INVERT: {
+            case OperationId::INVERT:
+            case OperationId::POW: {
                 op.result.prefetch();
-                float val = (op.id == OperationId::NEGATE || op.id == OperationId::INVERT) ?
+                auto val = (op.id == OperationId::NEGATE || op.id == OperationId::INVERT) ?
                             0.0f : std::get<float>(op.arg2);
                 std::function<float(float)> f;
                 switch (op.id) {
@@ -133,6 +137,7 @@ void SimpleExecutor::execute() const {
                     case OperationId::FDIV: f = [val](float x) { return x / val; }; break;
                     case OperationId::NEGATE: f = [](float x) { return -x; }; break;
                     case OperationId::INVERT: f = [](float x) { return 1.0f / x; }; break;
+                    case OperationId::POW: f = [val](float x) { return std::pow(x, val); }; break;
                     default: break;
                 }
                 std::transform(std::execution::par_unseq,
@@ -141,7 +146,7 @@ void SimpleExecutor::execute() const {
             }
 
             case OperationId::MATMUL: {
-                const BoundTensor &src2_t = std::get<BoundTensor>(op.arg2);
+                const auto &src2_t = std::get<BoundTensor>(op.arg2);
                 src2_t.prefetch();
                 op.result.prefetch();
                 const auto &shape2 = src2_t.shape;
@@ -158,7 +163,7 @@ void SimpleExecutor::execute() const {
                     M = 1; N = shape1.back(); K = 1;
                 }
 
-                ptrdiff_t n2 = 1;
+                size_t n2 = 1;
                 for (size_t d : shape2) n2 *= d;
                 const size_t matrix1_sz = M * N;
                 const size_t matrix2_sz = N * K;
@@ -210,8 +215,110 @@ void SimpleExecutor::execute() const {
                 break;
             }
 
-            default:
-                throw std::runtime_error("Unsupported operation in SimpleExecutor");
+            case OperationId::GATHER: {
+                const auto& idx = std::get<IndexList>(op.arg2);
+                op.result.prefetch();
+
+                const float* src  = op.arg1.start;
+                float*       dst  = op.result.start;
+                const auto& shape = op.arg1.shape;
+                const unsigned int axis = idx.axis;
+
+                size_t outer = 1;
+                for (unsigned int i = 0; i < axis; ++i)
+                    outer *= shape[i];
+
+                size_t axis_len = shape[axis];
+
+                size_t inner = 1;
+                for (unsigned int i = axis + 1; i < shape.size(); ++i)
+                    inner *= shape[i];
+
+                for (size_t o = 0; o < outer; ++o) {
+                    const float* src_block = src + o * axis_len * inner;
+                    float*       dst_block = dst + o * idx.size * inner;
+
+                    for (size_t j = 0; j < idx.size; ++j) {
+                        if (idx.data[j] >= axis_len || idx.data[j] < 0) throw std::out_of_range("Index " + std::to_string(idx.data[j]) + " is out of bounds.");
+                        auto index = static_cast<size_t>(idx.data[j]);
+                        // В реальном коде стоит проверять index < axis_len
+                        const float* src_row = src_block + index * inner;
+                        float*       dst_row = dst_block + j * inner;
+                        std::copy(src_row, src_row + inner, dst_row);
+                    }
+                }
+                break;
+            }
+
+            case OperationId::REDUCE_MIN:
+            case OperationId::REDUCE_MAX:
+            case OperationId::REDUCE_SUM:
+            case OperationId::REDUCE_MEAN: {
+                size_t axis = std::get<size_t>(op.arg2);
+                op.result.prefetch();
+                const float* src = op.arg1.start;
+                float* dst = op.result.start;
+                const auto& shape = op.arg1.shape;
+
+                auto ndim = static_cast<size_t>(shape.size());
+                if (axis >= ndim) throw std::runtime_error("Invalid reduction axis");
+
+                size_t outer = 1;
+                for (size_t i = 0; i < axis; ++i) outer *= shape[i];
+                size_t inner = 1;
+                for (size_t i = axis + 1; i < ndim; ++i) inner *= shape[i];
+                size_t axis_len = shape[axis];
+
+                for (size_t o = 0; o < outer; ++o) {
+                    for (size_t inn = 0; inn < inner; ++inn) {
+                        const float* src_ptr = src + o * axis_len * inner + inn;
+                        float acc = (op.id == OperationId::REDUCE_MIN) ? std::numeric_limits<float>::max()
+                                                                       : (op.id == OperationId::REDUCE_MAX) ? std::numeric_limits<float>::lowest()
+                                                                                                            : 0.0f;
+
+                        for (size_t k = 0; k < axis_len; ++k) {
+                            float val = src_ptr[k * inner];
+                            switch (op.id) {
+                                case OperationId::REDUCE_MIN: { acc = std::min(acc, val); break; }
+                                case OperationId::REDUCE_MAX: { acc = std::max(acc, val); break; }
+                                case OperationId::REDUCE_SUM:
+                                case OperationId::REDUCE_MEAN: { acc += val; break; }
+                                default: break;
+                            }
+                        }
+                        if (op.id == OperationId::REDUCE_MEAN) acc /= static_cast<float>(axis_len);
+                        dst[o * inner + inn] = acc;
+                    }
+                }
+                break;
+            }
+
+            case OperationId::REPEAT: {
+                size_t repeats = std::get<size_t>(op.arg2);
+                op.result.prefetch();
+
+                const float* src = op.arg1.start;
+                float* dst = op.result.start;
+                const auto& shape = op.arg1.shape;
+
+                size_t L = shape.back();
+                size_t num_blocks = n1 / L;
+
+                std::vector<size_t> blocks(num_blocks);
+                for (size_t i = 0; i < num_blocks; ++i) blocks[i] = i;
+
+                std::for_each(std::execution::par, blocks.begin(), blocks.end(),
+                              [src, dst, L, repeats](size_t b) {
+                                  const float* block_src = src + b * L;
+                                  float* block_dst = dst + b * L * repeats;
+                                  for (size_t r = 0; r < repeats; ++r) {
+                                      std::copy(block_src, block_src + L, block_dst + r * L);
+                                  }
+                              });
+                break;
+            }
+
+            default: throw std::runtime_error("Unsupported operation in SimpleExecutor");
         }
     }
 }

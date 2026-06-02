@@ -7,41 +7,27 @@
 #pragma once
 
 
-class ReLU final: public Module {
+class ModuleClass(ReLU) {
 public:
-    inline ReLU(Graph *graph): Module(graph) {}
-    inline ReLU(): ReLU(Graph::get_active()) {}
-protected:
-    Tensor forward(const Tensor &x) override;
+    static Tensor forward(const Tensor &x);
 };
 
-class Sigmoid final: public Module {
+class ModuleClass(Sigmoid) {
 public:
-    inline Sigmoid(Graph *graph): Module(graph) {}
-    inline Sigmoid(): Sigmoid(Graph::get_active()) {}
-protected:
-    Tensor forward(const Tensor &x) override;
+    static Tensor forward(const Tensor &x);
 };
 
-class Flatten final: public Module {
+class ModuleClass(Flatten) {
 public:
-    inline Flatten(Graph *graph): Module(graph) {}
-    inline Flatten(): Flatten(Graph::get_active()) {}
-protected:
-    Tensor forward(const Tensor &x) override;
+    static Tensor forward(const Tensor &x);
 };
 
-class Tanh final : public Module {
+class ModuleClass(Tanh) {
 public:
-    inline Tanh(Graph *graph) : Module(graph) {}
-    inline Tanh(): Tanh(Graph::get_active()) {}
-protected:
-    Tensor forward(const Tensor &x) override;
+    static Tensor forward(const Tensor &x);
 };
 
-//class GELU final : public Module {
-//public:
-//    inline GELU(Graph *graph) : Module(graph), x3(future()) {}
-//protected:
-//    Tensor::CanAssign forward(const Tensor &x) override;
-//};
+class ModuleClass(GELU) {
+public:
+    static Tensor forward(const Tensor &x);
+};

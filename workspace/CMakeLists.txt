@@ -3,6 +3,7 @@ project(CPUDiffusion)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ---------- пути ----------
 set(LIB_SRC_DIR      ${CMAKE_SOURCE_DIR}/../lib/src)
@@ -35,10 +36,31 @@ foreach(LIB_PATH ${LIB_SUBDIRS})
     endif()
 endforeach()
 
+# ---------- кастомная очистка перед сборкой ----------
+file(GLOB_RECURSE FILES_TO_CLEAN CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/*repr"
+        "${CMAKE_SOURCE_DIR}/*.traw"
+        "${CMAKE_SOURCE_DIR}/*.dot"
+        "${CMAKE_SOURCE_DIR}/*.svg"
+        "${CMAKE_SOURCE_DIR}/out/*"
+)
+
+if(FILES_TO_CLEAN)
+    add_custom_target(workflow_clean ALL
+            COMMAND ${CMAKE_COMMAND} -E rm -f ${FILES_TO_CLEAN}
+            COMMENT "Cleaning generated files..."
+    )
+else()
+    add_custom_target(workflow_clean ALL)
+endif()
+
 # ---------- основная программа ----------
 add_executable(${PROJECT_NAME} main.cpp)
 target_include_directories(${PROJECT_NAME} PRIVATE ${LIB_INCLUDES_DIR})
 target_link_libraries(${PROJECT_NAME} PRIVATE ${ALL_LIB_TARGETS})
+
+# кастомная очистка
+add_dependencies(${PROJECT_NAME} workflow_clean)
 
 # чтобы заголовки всегда были актуальны перед компиляцией
 foreach(CT ${ALL_COPY_TARGETS})

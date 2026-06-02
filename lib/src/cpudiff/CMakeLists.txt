@@ -1,7 +1,7 @@
 add_dynamic_library(
     NAME cpudiff
     SOURCES
-        typeutils/float.cpp
+        typeutils/to_float.cpp
 
         core/graph.cpp
         core/tensor.cpp
@@ -12,29 +12,37 @@ add_dynamic_library(
         layers/linear.cpp
         layers/sequential.cpp
         layers/functions.cpp
+        layers/transformer_parts.cpp
 
         images/png.cpp
 
         executors/simple.cpp
 
+        models/tokenizer.cpp
+
     HEADERS
         typeutils/dtypes.h
-        typeutils/float.h
+        typeutils/to_float.h
 
         core/graph.h
         core/tensor.h
+        core/any_tensor.h
         core/operation.h
 
         safetensors/reader.h
 
         layers/module.h
+        layers/module_list.h
         layers/linear.h
         layers/sequential.h
         layers/functions.h
+        layers/transformer_parts.h
 
         images/png.h
 
         executors/simple.h
+
+        models/tokenizer.h
 
         typeutils.h
         core.h
@@ -42,6 +50,7 @@ add_dynamic_library(
         layers.h
         images.h
         executors.h
+        models.h
 
         cpudiff.h
 

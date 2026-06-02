@@ -4,4 +4,5 @@
 
 #include "core/graph.h"
 #include "core/tensor.h"
+#include "core/any_tensor.h"
 #include "core/operation.h"

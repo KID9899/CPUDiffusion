@@ -8,8 +8,9 @@
 
 class SimpleExecutor final : public GraphExecutor {
 protected:
-    const std::unordered_set<OperationId> &getSupportedOperation() const override;
+    [[nodiscard]] const std::unordered_set<OperationId> &getSupportedOperation() const override;
 public:
     inline SimpleExecutor(Graph *graph) : GraphExecutor(graph) {}
+    inline SimpleExecutor(): SimpleExecutor(Graph::get_active()) {}
     void execute() const override;
 };

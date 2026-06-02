@@ -18,12 +18,12 @@ SafeTensorsFile::SafeTensorsFile(const std::string &path, Graph *graph) : graph(
     int fd = open(path.c_str(), O_RDONLY);
     if (fd == -1) throw std::runtime_error("Cannot open file: " + path);
 
-    struct stat st;
+    struct stat st{};
     if (fstat(fd, &st) == -1) {
         close(fd);
         throw std::runtime_error("Cannot stat file: " + path);
     }
-    size_t file_size = static_cast<size_t>(st.st_size);
+    auto file_size = static_cast<size_t>(st.st_size);
     if (file_size < 8) {
         close(fd);
         throw std::runtime_error("File too small to be a valid safetensors file");
@@ -83,7 +83,7 @@ SafeTensorsFile::SafeTensorsFile(const std::string &path, Graph *graph) : graph(
         }
 
         const void *src_ptr = data_base + start_off;
-        size_t byte_size = static_cast<size_t>(end_off - start_off);
+        auto byte_size = static_cast<size_t>(end_off - start_off);
         size_t nelem = 1;
         for (auto d : shape) nelem *= d;
 

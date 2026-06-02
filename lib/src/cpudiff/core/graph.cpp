@@ -43,9 +43,9 @@ Tensor Graph::allocate(const std::vector<size_t> &shape, const std::string &name
             throw std::runtime_error("Zero dimension in shape");
 
     size_t nelem = num_elements(shape);
-    float* ptr = new float[nelem];      // выделяем
-    maped.push_back(ptr);               // владеем
-    usable[ptr] = nelem;                // доступный блок
+    auto* ptr = new float[nelem]; // выделяем
+    mapped.push_back(ptr); // владеем
+    usable[ptr] = nelem; // доступный блок
 
     Tensor t(this, shape, name);
     bound[t.id] = ptr;
@@ -70,9 +70,10 @@ float* Graph::force_bind(const Tensor &t, bool result) {
     if (t.id == 0 || t.graph != this)
         throw std::runtime_error("Cannot bind an empty or foreign tensor");
 
-    if (compiled && std::find(results.begin(), results.end(), t.id) == results.end()) {
+    if (compiled && !results.contains(t.id)) {
         throw std::runtime_error("Only the resulting tensors can be bound from a compiled graph");
     } else if (result) {
+        if (size_tensors.contains(t.id)) throw std::runtime_error("The index tensor cannot be the resulting one");
         results.insert(t.id);
     }
 
@@ -82,8 +83,8 @@ float* Graph::force_bind(const Tensor &t, bool result) {
 
     // Памяти ещё нет – выделяем сейчас
     size_t nelem = num_elements(t.shape_);
-    float* ptr = new float[nelem];
-    maped.push_back(ptr);               // владеем
+    auto* ptr = new float[nelem];
+    mapped.push_back(ptr);               // владеем
     usable[ptr] = nelem;                // доступный блок
     bound[t.id] = ptr;
     return ptr;
@@ -91,7 +92,7 @@ float* Graph::force_bind(const Tensor &t, bool result) {
 
 Graph::~Graph() {
     if (current_graph == this) current_graph = nullptr;
-    for (void* ptr : maped)
+    for (void* ptr : mapped)
         ::operator delete(ptr);
 }
 
@@ -120,6 +121,7 @@ void Graph::compile() {
             if (arg_id == 0) return;
             LifeInfo& info = life[arg_id];
             info.last_use = static_cast<int>(i);
+            if (size_tensors.contains(arg_id)) throw std::runtime_error("It is impossible to perform tensor operations with the size tensor");
         };
 
         update(op.arg1);
@@ -139,7 +141,7 @@ void Graph::compile() {
             free_blocks.emplace_back(ptr, sz);
     }
 
-    // Ищем наименьший подходящий свобоный блок
+    // Ищем наименьший подходящий свободный блок
     auto best_fit_free = [&](size_t required) -> float* {
         float* best_ptr = nullptr;
         size_t best_size = SIZE_MAX;
@@ -177,6 +179,8 @@ void Graph::compile() {
         CompleteOperation::ARG2_t arg2_val;
         if (OperationGroups::arg2_is_tensor.contains(op.id)) {
             unsigned int a2 = std::get<unsigned int>(op.arg2);
+            if (size_tensors.contains(a2))
+                throw std::runtime_error("Size tensor used in incompatible operation");
             if (a2 == 0) throw std::runtime_error("Null tensor arg2");
             auto it = bound.find(a2);
             if (it == bound.end())
@@ -187,8 +191,12 @@ void Graph::compile() {
             arg2_val = std::get<float>(op.arg2);
         } else if (OperationGroups::arg2_is_string.contains(op.id)) {
             arg2_val = std::get<const char*>(op.arg2);
+        } else if (OperationGroups::arg2_is_indexlist.contains(op.id)) {
+            arg2_val = std::get<IndexList>(op.arg2);
+        } else if (OperationGroups::arg2_is_size.contains(op.id)) {
+            arg2_val = static_cast<size_t>(std::get<unsigned int>(op.arg2));
         } else {
-            arg2_val = BoundTensor{};
+            arg2_val = size_t{0u};
         }
 
         // Результат
@@ -226,9 +234,9 @@ void Graph::compile() {
                             if (results.count(cand_id)) return false;
                             float *cand_ptr = bound.at(cand_id);
                             size_t cand_size = usable.at(cand_ptr);
-                            if (cand_size != required) return false;  // только точное совпадение
-                            // Забираем блок
-                            bound[res_id] = cand_ptr;
+                            if (cand_size != required) return false;  // Только точное совпадение
+                            bound[res_id] = cand_ptr; // Забираем блок
+                            bound.erase(cand_id);
                             res_ptr = cand_ptr;
                             return true;
                         };
@@ -248,7 +256,7 @@ void Graph::compile() {
                     // 3) Новая память
                     if (!res_ptr) {
                         res_ptr = new float[required];
-                        maped.push_back(res_ptr);
+                        mapped.push_back(res_ptr);
                         usable[res_ptr] = required;
                         bound[res_id] = res_ptr;
                     }
@@ -327,10 +335,8 @@ void Graph::repr_compiled(std::ostream& os) const {
         ensure_defined(arg1_ptr);
 
         const float* arg2_ptr = nullptr;
-        bool arg2_is_tensor = false;
         if (auto* bt = std::get_if<BoundTensor>(&op.arg2)) {
             arg2_ptr = bt->start;
-            arg2_is_tensor = true;
             ensure_defined(arg2_ptr);
         }
 
@@ -356,6 +362,14 @@ void Graph::repr_compiled(std::ostream& os) const {
         }
         else if (OperationGroups::arg2_is_null.contains(op.id)) {
             os << operation_name(op.id) << " [" << get_num(arg1_ptr) << "]\n";
+        }
+        else if (OperationGroups::arg2_is_indexlist.contains(op.id)) {
+            const auto& idx = std::get<IndexList>(op.arg2);
+            os << "[" << get_num(arg1_ptr) << "] gather axis=" << idx.axis << " len=" << idx.size << "\n";
+        }
+        else if (OperationGroups::arg2_is_size.contains(op.id)) {
+            size_t axis = std::get<size_t>(op.arg2);
+            os << operation_name(op.id) << " [" << get_num(arg1_ptr) << "] at " << axis << "\n";
         }
         else {
             os << "? unknown operation\n";
@@ -478,6 +492,9 @@ void Graph::repr(const std::string &filename, const std::string &fontname) const
             op_label += ss.str();
         } else if (OperationGroups::arg2_is_string.contains(op.id)) {
             op_label += " \\\"" + std::string(std::get<const char*>(op.arg2)) + "\\\"";
+        } else if (OperationGroups::arg2_is_size.contains(op.id)) {
+            unsigned int axis = std::get<unsigned int>(op.arg2);
+            op_label += " at " + std::to_string(axis);
         }
 
         ofs << "  " << op_id << " [shape=diamond, label=\"" << op_label << "\"];\n";
@@ -488,6 +505,13 @@ void Graph::repr(const std::string &filename, const std::string &fontname) const
             unsigned int a2 = std::get<unsigned int>(op.arg2);
             if (a2)
                 ofs << "  tensor_" << a2 << " -> " << op_id << ";\n";
+        }
+        if (OperationGroups::arg2_is_indexlist.contains(op.id)) {
+            const auto& idl = std::get<IndexList>(op.arg2);
+            if (!compiled || !usable.contains(const_cast<float*>(reinterpret_cast<const float*>(idl.data)))) {
+                ofs << "block_" << std::to_string(reinterpret_cast<uintptr_t>(idl.data)) << " [shape=box, style=filled, fillcolor=lightblue, label=\"indexes\"];\n";
+            }
+            ofs << "block_" << std::to_string(reinterpret_cast<uintptr_t>(idl.data)) << " -> " << op_id << ";\n";
         }
         if (!OperationGroups::no_result.contains(op.id) && op.result)
             ofs << "  " << op_id << " -> tensor_" << op.result << ";\n";
@@ -505,14 +529,14 @@ void Graph::repr(const std::string &filename, const std::string &fontname) const
                     "block_" + std::to_string(reinterpret_cast<uintptr_t>(ptr));
             std::stringstream label;
             label << "0x" << std::hex << reinterpret_cast<uintptr_t>(ptr)
-                  << "\\n" << std::dec << sz << " floats";
+                  << "\\n" << std::dec << sz << " items";
             ofs << "  " << block_id
                 << " [shape=box, style=filled, fillcolor=lightblue, label=\""
                 << label.str() << "\"];\n";
 
             // Пунктирные стрелки от тензоров к блоку
-            for (const auto& [tid, tptr] : bound) {
-                if (tptr == ptr && tinfo.count(tid))
+            for (const auto& [tid, t_ptr] : bound) {
+                if (t_ptr == ptr && tinfo.count(tid))
                     ofs << "  tensor_" << tid << " -> " << block_id
                         << " [style=dashed, color=blue];\n";
             }
@@ -583,11 +607,11 @@ void BoundTensor::repr(std::ostream &out) const {
 void BoundTensor::dump(std::ostream &out) const {
     size_t rank = shape.size();
     out.write(reinterpret_cast<const char*>(&rank), sizeof(rank));
-    out.write(reinterpret_cast<const char*>(shape.data()), rank * sizeof(size_t));
+    out.write(reinterpret_cast<const char*>(shape.data()), static_cast<std::streamsize>(rank * sizeof(size_t)));
 
     size_t total = num_elements(shape);
     const float* data_ptr = start;
-    out.write(reinterpret_cast<const char*>(data_ptr), total * sizeof(float));
+    out.write(reinterpret_cast<const char*>(data_ptr), static_cast<std::streamsize>(total * sizeof(float)));
 }
 
 Tensor Graph::load(const std::string &filename, const std::string &name) {
@@ -601,7 +625,7 @@ Tensor Graph::load(const std::string &filename, const std::string &name) {
 
     // Чтение размерностей
     std::vector<size_t> shape(rank);
-    in.read(reinterpret_cast<char*>(shape.data()), rank * sizeof(size_t));
+    in.read(reinterpret_cast<char*>(shape.data()), static_cast<std::streamsize>(rank * sizeof(size_t)));
     if (!in) throw std::runtime_error("Graph::load: failed to read shape");
 
     size_t total = num_elements(shape);
@@ -610,8 +634,26 @@ Tensor Graph::load(const std::string &filename, const std::string &name) {
     Tensor t = allocate(shape, name);
     // Получаем указатель на данные
     float* data = bound.at(t.id);
-    in.read(reinterpret_cast<char*>(data), total * sizeof(float));
+    in.read(reinterpret_cast<char*>(data), static_cast<std::streamsize>(total * sizeof(float)));
     if (!in) throw std::runtime_error("Graph::load: failed to read tensor data");
 
     return t;
+}
+
+const CompatibleInt *Graph::to_size_tensor(const Tensor &t) {
+    if (size_tensors.contains(t.id))
+        return reinterpret_cast<const CompatibleInt*>(bound.at(t.id));
+    auto it = bound.find(t.id);
+    if (it == bound.end())
+        throw std::runtime_error("Tensor must be initialized before converting to size tensor");
+    if (results.count(t.id))
+        throw std::runtime_error("Result tensor cannot become a size tensor");
+
+    size_tensors.insert(t.id);
+    float* src = it->second;
+    size_t nelem = usable.at(src);
+    auto* dst = reinterpret_cast<CompatibleInt*>(src);
+    for (size_t i = 0; i < nelem; ++i)
+        dst[i] = static_cast<CompatibleInt>(src[i]);
+    return dst;
 }
