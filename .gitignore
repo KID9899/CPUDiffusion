@@ -10,10 +10,13 @@ workspace/cmake-build-debug/*
 workspace/CPUDiffusion
 workspace/perf*
 workspace/*.safetensors
+workspace/*vocab*.txt
+workspace/*merges*.txt
 workspace/*.dot
 workspace/*.trepr
 workspace/*.grepr
 workspace/*.traw
+workspace/*.svg
 
 workspace/out
 workspace/out/*

@@ -8,16 +8,15 @@
 
 #pragma once
 
-class Sequential final: public Module {
+class ModuleClass(Sequential) {
 public:
     std::vector<std::shared_ptr<Module>> layers;
-    inline Sequential(Graph *graph, std::initializer_list<std::shared_ptr<Module>> list): Module(graph), layers(list) {
+    inline Sequential(const std::vector<std::shared_ptr<Module>> &list): layers(list) {
         for (size_t i = 0; i < layers.size(); ++i) {
             register_module(std::to_string(i), layers[i].get());
         }
     }
-    inline Sequential(std::initializer_list<std::shared_ptr<Module>> list): Sequential(Graph::get_active(), list) {}
-protected:
-    Tensor forward(const Tensor &x) override;
+
+    AnyTensor forward(const AnyTensor &x);
 };
 

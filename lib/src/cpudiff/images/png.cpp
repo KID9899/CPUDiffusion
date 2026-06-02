@@ -6,7 +6,6 @@
 #include <string>
 #include <stdexcept>
 #include <cstring>
-#include <cmath>
 #include <sstream>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -15,15 +14,15 @@
 #include "png.h"
 
 // Запись одноканального PNG
-static void write_grayscale_png(const std::string& path, int w, int h, const float* data) {
+static void write_grayscale_png(const std::string& path, size_t w, size_t h, const float* data) {
     std::vector<unsigned char> pixels(w * h);
-    for (int i = 0; i < w * h; ++i) {
+    for (size_t i = 0; i < w * h; ++i) {
         float v = data[i];
         if (v < 0.0f) v = 0.0f;
         if (v > 1.0f) v = 1.0f;
         pixels[i] = static_cast<unsigned char>(v * 255.0f);
     }
-    if (stbi_write_png(path.c_str(), w, h, 1, pixels.data(), w) == 0) {
+    if (stbi_write_png(path.c_str(), static_cast<int>(w), static_cast<int>(h), 1, pixels.data(), static_cast<int>(w)) == 0) {
         throw std::runtime_error("Failed to write PNG: " + path);
     }
 }
@@ -31,7 +30,7 @@ static void write_grayscale_png(const std::string& path, int w, int h, const flo
 // Основная функция
 void CpuDiffImages::save_images(const Tensor &t, const std::string& filename) {
     const std::vector<size_t> &shape = t.shape();
-    const float *data = t.bind();
+    const float *data = t.touch();
 
     if (!filename.ends_with(".png"))
         throw std::runtime_error("Only PNG format is supported");
@@ -43,9 +42,9 @@ void CpuDiffImages::save_images(const Tensor &t, const std::string& filename) {
         throw std::runtime_error("Tensor rank must be <= 12, otherwise %d placeholders overflow");
 
 
-    const int batch_rank = rank - 2;
-    const int H = shape[batch_rank];
-    const int W = shape[batch_rank + 1];
+    const size_t batch_rank = rank - 2;
+    const size_t H = shape[batch_rank];
+    const size_t W = shape[batch_rank + 1];
 
     // Проверка имени файла на допустимость шаблонов %d
     for (size_t i = 0; i < filename.size(); ++i) {
@@ -67,7 +66,7 @@ void CpuDiffImages::save_images(const Tensor &t, const std::string& filename) {
 
     // Вычисление страйдов
     std::vector<size_t> stride(rank, 1);
-    for (int i = rank - 2; i >= 0; --i) {
+    for (int i = static_cast<int>(rank - 2); i >= 0; --i) {
         stride[i] = stride[i + 1] * shape[i + 1];
     }
 
@@ -78,14 +77,14 @@ void CpuDiffImages::save_images(const Tensor &t, const std::string& filename) {
     }
 
     // Перебор всех комбинаций индексов
-    std::vector<int> index(batch_rank, 0);
+    std::vector<size_t> index(batch_rank, 0);
     size_t total_slices = 1;
     for (int i = 0; i < batch_rank; ++i) total_slices *= shape[i];
 
     for (size_t slice = 0; slice < total_slices; ++slice) {
         // Вычисляем многомерный индекс из линейного
         size_t rem = slice;
-        for (int i = batch_rank - 1; i >= 0; --i) {
+        for (int i = static_cast<int>(batch_rank) - 1; i >= 0; --i) {
             index[i] = rem % shape[i];
             rem /= shape[i];
         }
